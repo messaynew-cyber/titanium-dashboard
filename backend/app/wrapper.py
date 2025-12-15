@@ -2,10 +2,29 @@ import sys
 import threading
 import time
 import json
+import requests  # Added for Telegram
 from pathlib import Path
 import pandas as pd
 from datetime import datetime
 
+# ==========================================
+# TELEGRAM CONFIGURATION
+# ==========================================
+TG_BOT_TOKEN = "8248228272:AAEbiHCplES8-ko8-hDln4-jqEjHoiwMTwo"
+TG_CHANNEL_ID = "-1003253651772"
+
+def send_telegram(message):
+    """Sends a notification to your Telegram Channel."""
+    try:
+        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TG_CHANNEL_ID, "text": message, "parse_mode": "HTML"}
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"[ERROR] Telegram failed: {e}")
+
+# ==========================================
+# SYSTEM SETUP
+# ==========================================
 # Add the parent directory to sys.path to import the algo
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
@@ -33,10 +52,15 @@ class TitaniumService:
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
+        
+        # Notify Telegram on Start
+        send_telegram("🚀 <b>TITANIUM ENGINE STARTED</b>\nSystem is online and scanning markets.")
+        
         return {"status": "Started"}
 
     def stop_engine(self):
         self.running = False
+        send_telegram("🛑 <b>TITANIUM ENGINE STOPPED</b>\nTrading halted by user.")
         return {"status": "Stopping..."}
 
     def _run_loop(self):
@@ -48,12 +72,15 @@ class TitaniumService:
                 # 1. Circuit Breakers
                 can_trade, reason = self.orchestrator.circuit_breaker.can_trade()
                 if not can_trade:
-                    print(f"[WARNING] HALTED: {reason}")
+                    msg = f"[WARNING] HALTED: {reason}"
+                    print(msg)
+                    send_telegram(f"⛔ <b>CIRCUIT BREAKER TRIPPED</b>\nReason: {reason}")
                     time.sleep(60)
                     continue
 
                 # 2. Get Data
                 print(f"[INFO] Fetching {CFG.SYMBOL} data...")
+                # FIXED: Using 365 days for HMM stability
                 df_symbol = self.orchestrator.data_engine.get_data(CFG.SYMBOL, 365)
                 df_benchmark = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 365)
 
@@ -68,12 +95,11 @@ class TitaniumService:
                     
                     print(f"[INFO] Analysis: Signal={signal['signal']:.2f} | Regime={regime_info['regime']}")
 
-                    # 4. EXECUTION LOGIC (The Hands)
-                    # Calculate how many shares we SHOULD have based on the signal
+                    # 4. EXECUTION LOGIC
                     current_price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
                     current_qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
                     
-                    # Target Value = Equity * Position % (e.g. $100k * 0.20 = $20k)
+                    # Target Value
                     target_value = STATE.state['equity'] * signal['position_pct']
                     target_qty = int(target_value / current_price) if current_price > 0 else 0
                     
@@ -81,9 +107,7 @@ class TitaniumService:
                     delta_shares = target_qty - current_qty
                     delta_value = abs(delta_shares * current_price)
 
-                    # 5. The "Smart Filter"
-                    # Only trade if the difference is worth more than $200 (Prevents spamming tiny trades)
-                    # AND if cooldown passed (1 minute)
+                    # 5. Smart Filter (Trade > $200)
                     if delta_value > 200:
                         print(f"[TRADE DETECTED] Adjusting position by {delta_shares} shares...")
                         
@@ -104,22 +128,28 @@ class TitaniumService:
                                     position_qty=target_qty, 
                                     last_trade_time=datetime.now().isoformat()
                                 )
-                                print(f"[SUCCESS] Executed {side.upper()} {abs(delta_shares)} shares")
+                                log_msg = f"✅ <b>EXECUTION CONFIRMED</b>\nSide: {side.upper()}\nQty: {abs(delta_shares)}\nPrice: ${current_price:.2f}\nSymbol: {CFG.SYMBOL}"
+                                print(f"[SUCCESS] {log_msg}")
+                                send_telegram(log_msg)
                         else:
                             print(f"[RISK REJECT] {msg}")
+                            # Only notify on risk reject if it's NOT just the cooldown
+                            if "volume" not in msg:
+                                send_telegram(f"🛡 <b>RISK REJECTION</b>\nTrade blocked by safety rules.\nReason: {msg}")
                     else:
                         print(f"[HOLD] Position optimal (Delta: ${delta_value:.2f} < $200)")
 
                     # Update UI
                     STATE.update(current_regime=regime_info.get('regime', 1))
 
-                # Sleep for POLL_INTERVAL (Defined in config as 240s)
+                # Sleep for POLL_INTERVAL (240s / 4 mins)
                 for _ in range(CFG.POLL_INTERVAL):
                     if not self.running: break
                     time.sleep(1)
 
             except Exception as e:
                 print(f"[ERROR] Logic Failure: {e}")
+                send_telegram(f"⚠ <b>SYSTEM ERROR</b>\n{str(e)}")
                 time.sleep(60)
 
     def get_state(self):
@@ -153,6 +183,10 @@ class TitaniumService:
         return logs
 
     def force_trade(self, symbol, side, qty):
-        return self.orchestrator.execution_engine.submit_order(symbol, qty, side)
+        # Notify Telegram on manual force trade
+        res = self.orchestrator.execution_engine.submit_order(symbol, qty, side)
+        if res[0]:
+            send_telegram(f"🕹 <b>MANUAL OVERRIDE</b>\nUser forced {side.upper()} {qty} {symbol}")
+        return res
 
 titanium = TitaniumService()
