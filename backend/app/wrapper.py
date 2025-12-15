@@ -27,7 +27,6 @@ def send_telegram(message):
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 try:
-    # Import RISK_MANAGER directly to force update
     from algo.titanium_v1 import TitaniumOrchestrator, STATE, CFG, RISK_MANAGER
 except ImportError as e:
     print(f"CRITICAL ERROR: Could not import Algo. {e}")
@@ -50,7 +49,7 @@ class TitaniumService:
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        send_telegram("🚀 <b>TITANIUM ENGINE STARTED</b>\nSystem is online.")
+        send_telegram("🚀 <b>TITANIUM ENGINE STARTED</b>")
         return {"status": "Started"}
 
     def stop_engine(self):
@@ -62,46 +61,54 @@ class TitaniumService:
         print("--- AUTOMATED TRADING ENGAGED ---")
         self.orchestrator._run_startup_checks()
         
-        # 1. FORCE GLOBAL CONFIG UPDATE
-        print("[INFO] Forcing Safety Configs...")
+        # FORCE SAFETY OVERRIDE
+        print("[INFO] Applying Safety Overrides...")
         CFG.MAX_POSITION_SIZE = 0.40
         CFG.MAX_GROSS_EXPOSURE = 0.95
-        RISK_MANAGER.cfg.MAX_POSITION_SIZE = 0.40
-        RISK_MANAGER.cfg.MAX_GROSS_EXPOSURE = 0.95
+        RISK_MANAGER.cfg = CFG
         
         while self.running:
             try:
-                # Circuit Breaker
+                # 1. CIRCUIT BREAKER (THE ULTIMATE STOP LOSS)
                 can_trade, reason = self.orchestrator.circuit_breaker.can_trade()
+                
                 if not can_trade:
-                    print(f"[WARNING] HALTED: {reason}")
-                    time.sleep(60)
+                    # EMERGENCY PROTOCOL: LIQUIDATE ALL POSITIONS
+                    print(f"[EMERGENCY] Circuit Breaker Tripped: {reason}")
+                    
+                    qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
+                    if qty != 0:
+                        print(f"[EMERGENCY] Liquidating {qty} shares...")
+                        self.orchestrator.execution_engine.close_position(CFG.SYMBOL)
+                        msg = f"🚨 <b>EMERGENCY LIQUIDATION</b>\nReason: {reason}\nAction: Closed all positions."
+                        send_telegram(msg)
+                    else:
+                        print("[INFO] System Halted. No positions to close.")
+                        
+                    time.sleep(300) # Wait 5 mins before checking again
                     continue
 
-                # Data
+                # 2. DATA & ANALYSIS
                 print(f"[INFO] Fetching {CFG.SYMBOL} data...")
                 df_symbol = self.orchestrator.data_engine.get_data(CFG.SYMBOL, 365)
                 df_benchmark = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 365)
 
                 if not df_symbol.empty:
-                    # Analysis
                     df_features = self.orchestrator.feature_engine.create_features(df_symbol)
                     self.orchestrator.hmm_detector.train(df_features, self.orchestrator.feature_engine.feature_cols)
                     regime_info = self.orchestrator.hmm_detector.predict(df_features, self.orchestrator.feature_engine.feature_cols)
                     correlation = self.orchestrator.risk_manager.calculate_correlation(df_symbol, df_benchmark)
                     signal = self.orchestrator.strategy.generate_signal(df_features, regime_info, correlation)
                     
-                    # 2. THE HARD CLAMP (Safety Intervention)
+                    # 3. SAFETY CLAMP (Force size between -40% and +40%)
                     raw_pct = signal['position_pct']
                     clamped_pct = max(min(raw_pct, 0.40), -0.40)
-                    
                     if clamped_pct != raw_pct:
-                        print(f"[SAFETY CLAMP] Reduced size from {raw_pct:.2%} to {clamped_pct:.2%}")
                         signal['position_pct'] = clamped_pct
 
                     print(f"[INFO] Analysis: Signal={signal['signal']:.2f} | Size={signal['position_pct']:.2%}")
 
-                    # Execution Logic
+                    # 4. EXECUTION
                     current_price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
                     current_qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
                     
@@ -111,9 +118,9 @@ class TitaniumService:
                     delta_shares = target_qty - current_qty
                     delta_value = abs(delta_shares * current_price)
 
+                    # Min trade size $200
                     if delta_value > 200:
-                        print(f"[TRADE DETECTED] Adjusting by {delta_shares} shares...")
-                        
+                        print(f"[TRADE] Adjusting by {delta_shares} shares...")
                         is_valid, msg = self.orchestrator.risk_manager.validate_order(
                             CFG.SYMBOL, delta_shares, current_price, 
                             {CFG.SYMBOL: {'value': current_qty * current_price}}, 
@@ -137,7 +144,6 @@ class TitaniumService:
 
                     STATE.update(current_regime=regime_info.get('regime', 1))
 
-                # Sleep (4 mins)
                 for _ in range(CFG.POLL_INTERVAL):
                     if not self.running: break
                     time.sleep(1)
