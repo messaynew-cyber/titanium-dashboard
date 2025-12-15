@@ -66,6 +66,11 @@ class TitaniumService:
     def _run_loop(self):
         print("--- AUTOMATED TRADING ENGAGED ---")
         self.orchestrator._run_startup_checks()
+        # FORCE SAFETY OVERRIDE
+        print("[INFO] Applying Safety Overrides...")
+        CFG.MAX_POSITION_SIZE = 0.40
+        CFG.MAX_GROSS_EXPOSURE = 0.95
+        self.orchestrator.risk_manager.cfg = CFG
         
         while self.running:
             try:
