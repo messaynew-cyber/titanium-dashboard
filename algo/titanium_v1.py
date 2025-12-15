@@ -293,7 +293,7 @@ class TitaniumConfig:
     REGIME_CONFIDENCE_THRESHOLD: float = 0.60
 
     # --- OPERATIONAL ---
-    POLL_INTERVAL: int = 300
+    POLL_INTERVAL: int = 240
     HEARTBEAT_SECONDS: int = 60
     FAILSAFE_RETRY_LIMIT: int = 5
     EXPONENTIAL_BACKOFF_BASE: float = 2.0
