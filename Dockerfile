@@ -8,7 +8,6 @@ COPY frontend/tailwind.config.js ./
 COPY frontend/index.html ./
 RUN npm ci
 COPY frontend/src ./src
-COPY frontend/public ./public
 RUN npm run build
 
 # Runtime
