@@ -64,8 +64,8 @@ class TitaniumService:
 
                 # Get Data
                 print(f"[INFO] Fetching {CFG.SYMBOL} data...")
-                df_symbol = self.orchestrator.data_engine.get_data(CFG.SYMBOL, 100)
-                df_benchmark = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 100)
+                df_symbol = self.orchestrator.data_engine.get_data(CFG.SYMBOL, 365)
+                df_benchmark = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 365)
 
                 if not df_symbol.empty:
                     # Features & AI
