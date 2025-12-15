@@ -275,8 +275,8 @@ class TitaniumConfig:
 
     # --- RISK ---
     INITIAL_CAPITAL: float = 100_000.0
-    MAX_POSITION_SIZE: float = 0.20
-    MAX_GROSS_EXPOSURE: float = 0.50
+    MAX_POSITION_SIZE: float = 0.4
+    MAX_GROSS_EXPOSURE: float = 0.95
     MIN_CASH_BUFFER: float = 0.25
     KELLY_FRACTION_CAP: float = 0.40
     BAYESIAN_ALPHA: float = 2.0
