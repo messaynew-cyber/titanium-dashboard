@@ -6,8 +6,6 @@ function App() {
   const { data: state } = useSystemState();
   const { start, stop, forceTrade } = useSystemControl();
   const { data: logs } = useLogs();
-  
-  // State for manual trade input
   const [qty, setQty] = useState(1);
 
   return (
@@ -31,77 +29,33 @@ function App() {
         <MetricCard label="Drawdown" value={`${((state?.current_drawdown || 0) * 100).toFixed(2)}%`} />
       </div>
 
-      {/* CONTROLS AREA */}
+      {/* CONTROLS */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
-        
-        {/* LEFT: System Power */}
         <div className="bg-surface border border-border rounded-lg p-6 shadow-sm">
           <h3 className="text-lg font-bold mb-4 text-primary">System Power</h3>
           <div className="flex gap-4">
-            <button 
-              onClick={() => start.mutate()} 
-              className="flex-1 bg-success hover:bg-emerald-600 text-white font-bold py-3 rounded transition"
-            >
-              START ENGINE
-            </button>
-            <button 
-              onClick={() => stop.mutate()} 
-              className="flex-1 bg-danger hover:bg-red-600 text-white font-bold py-3 rounded transition"
-            >
-              STOP ENGINE
-            </button>
+            <button onClick={() => start.mutate()} className="flex-1 bg-success hover:bg-emerald-600 text-white font-bold py-3 rounded transition">START ENGINE</button>
+            <button onClick={() => stop.mutate()} className="flex-1 bg-danger hover:bg-red-600 text-white font-bold py-3 rounded transition">STOP ENGINE</button>
           </div>
         </div>
 
-        {/* RIGHT: Manual Override */}
         <div className="bg-surface border border-border rounded-lg p-6 shadow-sm">
-          <h3 className="text-lg font-bold mb-4 text-primary flex items-center justify-between">
-            <span>Manual Override</span>
-            <span className="text-xs text-secondary font-normal">Symbol: GLD</span>
-          </h3>
+          <h3 className="text-lg font-bold mb-4 text-primary">Manual Override (GLD)</h3>
           <div className="flex gap-4 items-center">
-            <div className="w-1/3">
-              <input 
-                type="number" 
-                value={qty}
-                onChange={(e) => setQty(Number(e.target.value))}
-                className="w-full border border-border rounded p-3 text-center font-bold"
-                placeholder="Qty"
-              />
-            </div>
-            <button 
-              onClick={() => forceTrade.mutate({ symbol: 'GLD', side: 'buy', qty })}
-              className="flex-1 bg-accent hover:bg-blue-600 text-white font-bold py-3 rounded transition"
-            >
-              BUY
-            </button>
-            <button 
-              onClick={() => forceTrade.mutate({ symbol: 'GLD', side: 'sell', qty })}
-              className="flex-1 bg-secondary hover:bg-slate-600 text-white font-bold py-3 rounded transition"
-            >
-              SELL
-            </button>
+            <input type="number" value={qty} onChange={(e) => setQty(Number(e.target.value))} className="w-1/3 border border-border rounded p-3 text-center font-bold" />
+            <button onClick={() => forceTrade.mutate({ symbol: 'GLD', side: 'buy', qty })} className="flex-1 bg-accent hover:bg-blue-600 text-white font-bold py-3 rounded transition">BUY</button>
+            <button onClick={() => forceTrade.mutate({ symbol: 'GLD', side: 'sell', qty })} className="flex-1 bg-secondary hover:bg-slate-600 text-white font-bold py-3 rounded transition">SELL</button>
           </div>
         </div>
-
       </div>
 
       {/* LOGS */}
       <div className="bg-surface border border-border rounded-lg shadow-sm h-96 flex flex-col">
-        <div className="px-6 py-4 border-b border-border bg-slate-50">
-          <h3 className="text-sm font-bold text-secondary uppercase tracking-wider">System Event Log</h3>
-        </div>
+        <div className="px-6 py-4 border-b border-border bg-slate-50"><h3 className="text-sm font-bold text-secondary uppercase tracking-wider">System Event Log</h3></div>
         <div className="flex-1 overflow-y-auto p-6 font-mono text-xs space-y-2 bg-white">
           {logs?.slice().reverse().map((l: any, i: number) => (
-            <div key={i} className="flex gap-3 border-b border-slate-50 pb-1 last:border-0">
-              <span className="text-slate-400 shrink-0">{l.timestamp.split('T')[1].split('.')[0]}</span>
-              <span className={
-                l.level === 'ERROR' ? 'text-danger font-bold' :
-                l.level === 'WARNING' ? 'text-warning font-bold' :
-                l.level === 'TRADE' ? 'text-success font-bold' : 'text-accent'
-              }>
-                [{l.level}]
-              </span>
+            <div key={i} className="flex gap-3 border-b border-slate-50 pb-1">
+              <span className={l.level === 'ERROR' ? 'text-danger font-bold' : l.level === 'WARNING' ? 'text-warning font-bold' : l.level === 'TRADE' ? 'text-success font-bold' : 'text-accent'}>[{l.level}]</span>
               <span className="text-primary">{l.message}</span>
             </div>
           ))}
@@ -110,5 +64,4 @@ function App() {
     </div>
   );
 }
-
 export default App;
