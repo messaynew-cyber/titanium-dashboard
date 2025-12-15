@@ -1,0 +1,13 @@
+hmmlearn
+alpaca-py
+rich
+scikit-learn
+twelvedata[pandas]
+yfinance
+gdown
+pyarrow
+joblib
+pandas
+numpy
+matplotlib
+scipy

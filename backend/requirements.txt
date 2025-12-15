@@ -1,0 +1,16 @@
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+python-multipart
+pandas
+numpy
+scikit-learn
+hmmlearn
+alpaca-py
+twelvedata
+yfinance
+rich
+scipy
+joblib
+pyarrow
+gdown
