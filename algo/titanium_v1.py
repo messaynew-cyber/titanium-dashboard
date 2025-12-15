@@ -1962,7 +1962,7 @@ class TitaniumOrchestrator:
 
         # 1. Data connectivity
         try:
-            test_data = self.data_engine.get_data('SPY', 5)
+            test_data = self.data_engine.get_data('SPY', 30)
             checks.append(("Data Engine", f"✓ {len(test_data)} bars", "PASS"))
         except Exception as e:
             checks.append(("Data Engine", f"✗ {str(e)[:50]}", "FAIL"))
