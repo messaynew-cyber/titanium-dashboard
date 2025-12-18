@@ -1,0 +1,49 @@
+import { useEffect, useState } from 'react';
+import { ExternalLink, Newspaper } from 'lucide-react';
+
+export function NewsFeed() {
+  const [news, setNews] = useState<any[]>([]);
+
+  useEffect(() => {
+    // Fetch Yahoo Finance RSS via a public CORS proxy (safe for frontend)
+    const fetchNews = async () => {
+      try {
+        const res = await fetch('https://api.rss2json.com/v1/api.json?rss_url=https://finance.yahoo.com/news/rssindex');
+        const data = await res.json();
+        setNews(data.items.slice(0, 5));
+      } catch (e) {
+        console.error("News fetch error", e);
+      }
+    };
+    fetchNews();
+  }, []);
+
+  return (
+    <div className="bg-surface border border-border rounded-lg shadow-sm h-full flex flex-col">
+      <div className="px-6 py-4 border-b border-border bg-black/20">
+        <h3 className="text-sm font-bold text-secondary uppercase tracking-wider flex items-center gap-2">
+          <Newspaper size={16} /> Market Intelligence
+        </h3>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {news.map((item, i) => (
+          <a key={i} href={item.link} target="_blank" rel="noreferrer" className="block group">
+            <div className="flex gap-4 items-start">
+              <div className="flex-1">
+                <h4 className="text-sm font-bold text-white group-hover:text-accent transition leading-snug mb-1">
+                  {item.title}
+                </h4>
+                <p className="text-xs text-secondary line-clamp-2">{item.description?.replace(/<[^>]*>?/gm, '')}</p>
+                <div className="flex items-center gap-1 mt-2 text-[10px] text-gray-500">
+                  <span>{new Date(item.pubDate).toLocaleTimeString()}</span>
+                  <span>•</span>
+                  <span className="flex items-center gap-1 group-hover:text-accent">Read <ExternalLink size={8}/></span>
+                </div>
+              </div>
+            </div>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
