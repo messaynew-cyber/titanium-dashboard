@@ -1,13 +1,40 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
   theme: {
     extend: {
       colors: {
-        background: "#F8F9FA", surface: "#FFFFFF", primary: "#0F172A",
-        secondary: "#64748B", accent: "#3B82F6", success: "#10B981",
-        danger: "#EF4444", warning: "#F59E0B", border: "#E2E8F0",
+        // The Deep Black/Green Background
+        background: "#000d01",
+        
+        // Glassy Cards (Slightly lighter dark green)
+        surface: "#051306", 
+        
+        // Text Colors
+        primary: "#FFFFFF",
+        secondary: "#9ca3af", // Neutral gray for labels
+        
+        // The Neon Green Accent (From your CSS variable --base-color-brand--green)
+        accent: "#53db78",
+        
+        // Semantic Colors
+        success: "#53db78", // Matching the accent
+        danger: "#ff5050",  // From your CSS error variables
+        warning: "#F59E0B",
+        
+        // Dark Borders
+        border: "#1f2923",
       },
+      fontFamily: {
+        sans: ['"DM Sans"', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'monospace'],
+      },
+      animation: {
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+      }
     },
   },
   plugins: [],
