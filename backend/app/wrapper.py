@@ -3,6 +3,7 @@ import threading
 import time
 import json
 import requests
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 
@@ -10,7 +11,6 @@ from datetime import datetime
 TG_BOT_TOKEN = "8248228272:AAEbiHCplES8-ko8-hDln4-jqEjHoiwMTwo"
 TG_CHANNEL_ID = "-1003253651772"
 
-# SETUP
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 try:
     from algo.titanium_v1 import TitaniumOrchestrator, STATE, CFG, RISK_MANAGER
@@ -32,8 +32,8 @@ class TitaniumService:
             cls._instance.orchestrator = TitaniumOrchestrator()
             cls._instance.running = False
             cls._instance.thread = None
-            # HISTORY STORAGE
-            cls._instance.equity_history = [] 
+            # Initialize history with current state to avoid empty charts
+            cls._instance.equity_history = [{"timestamp": datetime.now().isoformat(), "value": CFG.INITIAL_CAPITAL}]
             cls._instance.trade_history = []
         return cls._instance
 
@@ -42,7 +42,7 @@ class TitaniumService:
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        send_telegram("🚀 <b>TITANIUM STARTED</b>")
+        send_telegram("🚀 <b>TITANIUM ENGINE STARTED</b>")
         return {"status": "Started"}
 
     def stop_engine(self):
@@ -50,37 +50,88 @@ class TitaniumService:
         send_telegram("🛑 <b>TITANIUM STOPPED</b>")
         return {"status": "Stopping..."}
 
+    def run_backtest(self, days=180):
+        """Runs the orchestrator backtest and returns JSON results."""
+        print(f"[BUSY] Running Backtest for {days} days...")
+        try:
+            # We fetch data first to ensure we don't crash the main loop
+            df_symbol = self.orchestrator.data_engine.get_data(CFG.SYMBOL, days)
+            df_bench = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, days)
+            
+            if df_symbol.empty: return {"error": "No data"}
+            
+            # Prepare Features
+            df_features = self.orchestrator.feature_engine.create_features(df_symbol)
+            self.orchestrator.hmm_detector.train(df_features, self.orchestrator.feature_engine.feature_cols)
+            
+            # Run Sim
+            results = self.orchestrator._run_enhanced_simulation(df_features, df_bench)
+            
+            # Convert Pandas Series to JSON-friendly list
+            equity_curve = [{"date": str(d), "value": float(v)} for d, v in results['equity'].items()]
+            
+            # Sanitize NaNs
+            stats = {k: (0 if isinstance(v, float) and np.isnan(v) else v) for k, v in results['stats'].items()}
+            
+            return {
+                "stats": stats,
+                "equity_curve": equity_curve,
+                "trades": results['trades']
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def run_diagnostics(self):
+        """Runs system health checks."""
+        checks = []
+        # Data
+        try:
+            d = self.orchestrator.data_engine.get_data("SPY", 10)
+            checks.append({"name": "Data Feed", "status": "PASS", "details": f"{len(d)} bars"})
+        except Exception as e: checks.append({"name": "Data Feed", "status": "FAIL", "details": str(e)})
+        
+        # Broker
+        try:
+            acct = self.orchestrator.execution_engine.get_account_info()
+            checks.append({"name": "Broker Connection", "status": "PASS", "details": f"${acct.get('equity',0):,.2f}"})
+        except Exception as e: checks.append({"name": "Broker Connection", "status": "FAIL", "details": str(e)})
+        
+        # Model
+        checks.append({"name": "AI Model", "status": "PASS" if self.orchestrator.hmm_detector.is_trained else "WARN", "details": "Trained" if self.orchestrator.hmm_detector.is_trained else "Untrained"})
+        
+        return checks
+
     def _run_loop(self):
         print("--- AUTOMATION ENGAGED ---")
         self.orchestrator._run_startup_checks()
         
-        # SAFETY OVERRIDES
+        # Apply Config Overrides
         CFG.MAX_POSITION_SIZE = 0.40
         CFG.MAX_GROSS_EXPOSURE = 0.95
         RISK_MANAGER.cfg = CFG
         
         while self.running:
             try:
-                # 1. RECORD HISTORY
-                current_equity = STATE.state.get('equity', 100000)
+                # 1. UPDATE LIVE METRICS
+                # We fetch the latest price to update Equity accurately even if we don't trade
+                price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
+                qty, val, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
+                cash = float(self.orchestrator.execution_engine.get_account_info().get('cash', 0))
+                
+                # Real-time Equity Calculation
+                real_equity = cash + (qty * price)
+                
+                # Update History
                 self.equity_history.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "value": current_equity
+                    "timestamp": datetime.now().strftime("%H:%M"),
+                    "value": real_equity
                 })
-                # Keep last 100 points
-                if len(self.equity_history) > 100: self.equity_history.pop(0)
+                if len(self.equity_history) > 50: self.equity_history.pop(0)
+                
+                # Update State Object
+                STATE.update(equity=real_equity, cash=cash, position_qty=qty)
 
-                # 2. CIRCUIT BREAKER
-                can_trade, reason = self.orchestrator.circuit_breaker.can_trade()
-                if not can_trade:
-                    qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
-                    if qty != 0:
-                        self.orchestrator.execution_engine.close_position(CFG.SYMBOL)
-                        send_telegram(f"🚨 <b>LIQUIDATION</b>\nReason: {reason}")
-                    time.sleep(300)
-                    continue
-
-                # 3. TRADING LOGIC
+                # 2. TRADING LOGIC
                 df_symbol = self.orchestrator.data_engine.get_data(CFG.SYMBOL, 365)
                 df_bench = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 365)
 
@@ -91,37 +142,29 @@ class TitaniumService:
                     corr = self.orchestrator.risk_manager.calculate_correlation(df_symbol, df_bench)
                     signal = self.orchestrator.strategy.generate_signal(df_feats, regime, corr)
                     
-                    # CLAMP
+                    # Safety Clamp
                     clamped = max(min(signal['position_pct'], 0.40), -0.40)
                     signal['position_pct'] = clamped
 
-                    # EXECUTE
-                    price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
-                    curr_qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
-                    target_val = current_equity * signal['position_pct']
+                    # Execution
+                    target_val = real_equity * signal['position_pct']
                     target_qty = int(target_val / price) if price > 0 else 0
-                    delta = target_qty - curr_qty
+                    delta = target_qty - qty
                     
                     if abs(delta * price) > 200:
                         is_valid, msg = self.orchestrator.risk_manager.validate_order(
-                            CFG.SYMBOL, delta, price, 
-                            {CFG.SYMBOL: {'value': curr_qty * price}}, current_equity
+                            CFG.SYMBOL, delta, price, {CFG.SYMBOL: {'value': qty*price}}, real_equity
                         )
                         if is_valid:
                             side = "buy" if delta > 0 else "sell"
                             success, oid = self.orchestrator.execution_engine.submit_order(CFG.SYMBOL, abs(delta), side)
                             if success:
-                                STATE.update(position_qty=target_qty, last_trade_time=datetime.now().isoformat())
-                                log = f"✅ <b>EXECUTION</b>\n{side.upper()} {abs(delta)} @ ${price:.2f}"
-                                print(f"[SUCCESS] {log}")
-                                send_telegram(log)
-                                # Record Trade
+                                msg = f"✅ <b>EXECUTION</b>\n{side.upper()} {abs(delta)} @ ${price:.2f}"
+                                print(f"[SUCCESS] {msg}")
+                                send_telegram(msg)
                                 self.trade_history.insert(0, {
-                                    "time": datetime.now().strftime("%H:%M:%S"),
-                                    "symbol": CFG.SYMBOL,
-                                    "side": side.upper(),
-                                    "qty": abs(delta),
-                                    "price": price
+                                    "time": datetime.now().strftime("%H:%M"),
+                                    "symbol": CFG.SYMBOL, "side": side.upper(), "qty": abs(delta), "price": price
                                 })
 
                     STATE.update(current_regime=regime.get('regime', 1))
@@ -146,11 +189,10 @@ class TitaniumService:
                 "drawdown": STATE.state.get('current_drawdown', 0)
             },
             "history": self.equity_history,
-            "trades": self.trade_history[:50]
+            "trades": self.trade_history
         }
     
     def get_logs(self, limit=50):
-        # ... (Keep existing log logic) ...
         try:
             files = list(Path(CFG.LOG_PATH).glob("*.jsonl"))
             if not files: return []
