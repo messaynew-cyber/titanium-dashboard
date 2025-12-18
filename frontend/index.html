@@ -1,42 +1,12 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;500;700&family=JetBrains+Mono:wght@400;700&display=swap');
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-@layer base {
-  body {
-    @apply bg-background text-primary font-sans antialiased;
-    /* Optional: Add a subtle gradient mesh effect based on your CSS */
-    background-image: radial-gradient(circle at 50% 0%, #112915 0%, #000d01 60%);
-    min-height: 100vh;
-  }
-}
-
-@layer components {
-  /* This creates the "Glass" effect from your CSS */
-  .bg-surface {
-    @apply bg-opacity-80 backdrop-blur-md border border-border;
-    background-color: rgba(5, 19, 6, 0.7);
-  }
-  
-  /* Update Inputs to match dark theme */
-  input {
-    @apply bg-[#0a1f0c] border-border text-white placeholder-gray-600 focus:border-accent focus:ring-1 focus:ring-accent outline-none transition-all;
-  }
-}
-
-/* Custom Scrollbar for Logs */
-::-webkit-scrollbar {
-  width: 8px;
-}
-::-webkit-scrollbar-track {
-  background: #000d01; 
-}
-::-webkit-scrollbar-thumb {
-  background: #1f2923; 
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #53db78; 
-}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Titanium Dashboard</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
