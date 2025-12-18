@@ -1,13 +1,14 @@
 from fastapi import APIRouter, HTTPException
-from .schemas import SystemState, LogEntry, ForceTradeRequest
-from .wrapper import titanium
 from typing import List
+from .schemas import ForceTradeRequest, LogEntry
+from .wrapper import titanium
 
 router = APIRouter()
 
-@router.get("/status", response_model=SystemState)
+# This endpoint now returns the FULL data package (Equity, History, Trades)
+@router.get("/status")
 async def get_system_status():
-    return titanium.get_state()
+    return titanium.get_data()
 
 @router.get("/logs", response_model=List[LogEntry])
 async def get_system_logs(limit: int = 50):
@@ -30,4 +31,4 @@ async def execute_force_trade(trade: ForceTradeRequest):
 
 @router.get("/health")
 async def health_check():
-    return {"status": "online", "version": "1.0.0"}
+    return {"status": "online", "version": "2.0.0"}
