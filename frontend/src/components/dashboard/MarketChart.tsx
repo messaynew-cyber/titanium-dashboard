@@ -1,14 +1,18 @@
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
 export function MarketChart({ data }: { data: any[] }) {
   if (!data || data.length === 0) return <div className="h-full flex items-center justify-center text-gray-500">Waiting for market data...</div>;
 
   return (
     <div className="card-3d p-6 h-80">
-      <h3 className="text-sm font-bold text-secondary uppercase tracking-wider mb-4 flex items-center gap-2">
-        <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-        Live Market Price (GLD)
-      </h3>
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-sm font-bold text-secondary uppercase tracking-wider flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+          GLD Price Action
+        </h3>
+        <span className="text-xs text-secondary font-mono">1M INTERVAL</span>
+      </div>
+
       <div className="h-64 w-full">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data}>
@@ -18,9 +22,24 @@ export function MarketChart({ data }: { data: any[] }) {
                 <stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/>
               </linearGradient>
             </defs>
-            <XAxis dataKey="timestamp" hide />
-            {/* THIS LINE FIXES THE FLAT GRAPH */}
-            <YAxis domain={['dataMin', 'dataMax']} hide />
+            <CartesianGrid strokeDasharray="3 3" stroke="#1f2923" vertical={false} />
+            <XAxis 
+              dataKey="timestamp" 
+              stroke="#525252" 
+              fontSize={10}
+              tickLine={false}
+              axisLine={false}
+              minTickGap={30}
+            />
+            <YAxis 
+              domain={['auto', 'auto']} 
+              stroke="#525252" 
+              fontSize={10}
+              tickLine={false}
+              axisLine={false}
+              tickFormatter={(value) => `$${value.toFixed(0)}`}
+              width={40}
+            />
             <Tooltip 
               contentStyle={{ backgroundColor: '#050505', borderRadius: '8px', border: '1px solid #333' }}
               itemStyle={{ color: '#fff' }}
@@ -30,7 +49,7 @@ export function MarketChart({ data }: { data: any[] }) {
               type="monotone" 
               dataKey="price" 
               stroke="#3B82F6" 
-              strokeWidth={3} 
+              strokeWidth={2} 
               fill="url(#colorPrice)" 
               animationDuration={500}
             />
