@@ -4,44 +4,37 @@ import time
 import json
 import requests
 from pathlib import Path
-import pandas as pd
 from datetime import datetime
 
-# ==========================================
-# TELEGRAM CONFIGURATION
-# ==========================================
+# CONFIG
 TG_BOT_TOKEN = "8248228272:AAEbiHCplES8-ko8-hDln4-jqEjHoiwMTwo"
 TG_CHANNEL_ID = "-1003253651772"
+
+# SETUP
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+try:
+    from algo.titanium_v1 import TitaniumOrchestrator, STATE, CFG, RISK_MANAGER
+except ImportError as e:
+    sys.exit(1)
 
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TG_CHANNEL_ID, "text": message, "parse_mode": "HTML"}
         requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"[ERROR] Telegram failed: {e}")
-
-# ==========================================
-# SYSTEM SETUP
-# ==========================================
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-try:
-    from algo.titanium_v1 import TitaniumOrchestrator, STATE, CFG, RISK_MANAGER
-except ImportError as e:
-    print(f"CRITICAL ERROR: Could not import Algo. {e}")
-    sys.exit(1)
+    except: pass
 
 class TitaniumService:
     _instance = None
-
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(TitaniumService, cls).__new__(cls)
             cls._instance.orchestrator = TitaniumOrchestrator()
             cls._instance.running = False
             cls._instance.thread = None
-            cls._instance.last_rebalance = datetime.now()
+            # HISTORY STORAGE
+            cls._instance.equity_history = [] 
+            cls._instance.trade_history = []
         return cls._instance
 
     def start_engine(self):
@@ -49,142 +42,123 @@ class TitaniumService:
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        send_telegram("🚀 <b>TITANIUM ENGINE STARTED</b>")
+        send_telegram("🚀 <b>TITANIUM STARTED</b>")
         return {"status": "Started"}
 
     def stop_engine(self):
         self.running = False
-        send_telegram("🛑 <b>TITANIUM ENGINE STOPPED</b>")
+        send_telegram("🛑 <b>TITANIUM STOPPED</b>")
         return {"status": "Stopping..."}
 
     def _run_loop(self):
-        print("--- AUTOMATED TRADING ENGAGED ---")
+        print("--- AUTOMATION ENGAGED ---")
         self.orchestrator._run_startup_checks()
         
-        # FORCE SAFETY OVERRIDE
-        print("[INFO] Applying Safety Overrides...")
+        # SAFETY OVERRIDES
         CFG.MAX_POSITION_SIZE = 0.40
         CFG.MAX_GROSS_EXPOSURE = 0.95
         RISK_MANAGER.cfg = CFG
         
         while self.running:
             try:
-                # 1. CIRCUIT BREAKER (THE ULTIMATE STOP LOSS)
+                # 1. RECORD HISTORY
+                current_equity = STATE.state.get('equity', 100000)
+                self.equity_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "value": current_equity
+                })
+                # Keep last 100 points
+                if len(self.equity_history) > 100: self.equity_history.pop(0)
+
+                # 2. CIRCUIT BREAKER
                 can_trade, reason = self.orchestrator.circuit_breaker.can_trade()
-                
                 if not can_trade:
-                    # EMERGENCY PROTOCOL: LIQUIDATE ALL POSITIONS
-                    print(f"[EMERGENCY] Circuit Breaker Tripped: {reason}")
-                    
                     qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
                     if qty != 0:
-                        print(f"[EMERGENCY] Liquidating {qty} shares...")
                         self.orchestrator.execution_engine.close_position(CFG.SYMBOL)
-                        msg = f"🚨 <b>EMERGENCY LIQUIDATION</b>\nReason: {reason}\nAction: Closed all positions."
-                        send_telegram(msg)
-                    else:
-                        print("[INFO] System Halted. No positions to close.")
-                        
-                    time.sleep(300) # Wait 5 mins before checking again
+                        send_telegram(f"🚨 <b>LIQUIDATION</b>\nReason: {reason}")
+                    time.sleep(300)
                     continue
 
-                # 2. DATA & ANALYSIS
-                print(f"[INFO] Fetching {CFG.SYMBOL} data...")
+                # 3. TRADING LOGIC
                 df_symbol = self.orchestrator.data_engine.get_data(CFG.SYMBOL, 365)
-                df_benchmark = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 365)
+                df_bench = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 365)
 
                 if not df_symbol.empty:
-                    df_features = self.orchestrator.feature_engine.create_features(df_symbol)
-                    self.orchestrator.hmm_detector.train(df_features, self.orchestrator.feature_engine.feature_cols)
-                    regime_info = self.orchestrator.hmm_detector.predict(df_features, self.orchestrator.feature_engine.feature_cols)
-                    correlation = self.orchestrator.risk_manager.calculate_correlation(df_symbol, df_benchmark)
-                    signal = self.orchestrator.strategy.generate_signal(df_features, regime_info, correlation)
+                    df_feats = self.orchestrator.feature_engine.create_features(df_symbol)
+                    self.orchestrator.hmm_detector.train(df_feats, self.orchestrator.feature_engine.feature_cols)
+                    regime = self.orchestrator.hmm_detector.predict(df_feats, self.orchestrator.feature_engine.feature_cols)
+                    corr = self.orchestrator.risk_manager.calculate_correlation(df_symbol, df_bench)
+                    signal = self.orchestrator.strategy.generate_signal(df_feats, regime, corr)
                     
-                    # 3. SAFETY CLAMP (Force size between -40% and +40%)
-                    raw_pct = signal['position_pct']
-                    clamped_pct = max(min(raw_pct, 0.40), -0.40)
-                    if clamped_pct != raw_pct:
-                        signal['position_pct'] = clamped_pct
+                    # CLAMP
+                    clamped = max(min(signal['position_pct'], 0.40), -0.40)
+                    signal['position_pct'] = clamped
 
-                    print(f"[INFO] Analysis: Signal={signal['signal']:.2f} | Size={signal['position_pct']:.2%}")
-
-                    # 4. EXECUTION
-                    current_price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
-                    current_qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
+                    # EXECUTE
+                    price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
+                    curr_qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
+                    target_val = current_equity * signal['position_pct']
+                    target_qty = int(target_val / price) if price > 0 else 0
+                    delta = target_qty - curr_qty
                     
-                    target_value = STATE.state['equity'] * signal['position_pct']
-                    target_qty = int(target_value / current_price) if current_price > 0 else 0
-                    
-                    delta_shares = target_qty - current_qty
-                    delta_value = abs(delta_shares * current_price)
-
-                    # Min trade size $200
-                    if delta_value > 200:
-                        print(f"[TRADE] Adjusting by {delta_shares} shares...")
+                    if abs(delta * price) > 200:
                         is_valid, msg = self.orchestrator.risk_manager.validate_order(
-                            CFG.SYMBOL, delta_shares, current_price, 
-                            {CFG.SYMBOL: {'value': current_qty * current_price}}, 
-                            STATE.state['equity']
+                            CFG.SYMBOL, delta, price, 
+                            {CFG.SYMBOL: {'value': curr_qty * price}}, current_equity
                         )
-
                         if is_valid:
-                            side = "buy" if delta_shares > 0 else "sell"
-                            success, order_id = self.orchestrator.execution_engine.submit_order(
-                                CFG.SYMBOL, abs(delta_shares), side
-                            )
+                            side = "buy" if delta > 0 else "sell"
+                            success, oid = self.orchestrator.execution_engine.submit_order(CFG.SYMBOL, abs(delta), side)
                             if success:
                                 STATE.update(position_qty=target_qty, last_trade_time=datetime.now().isoformat())
-                                log_msg = f"✅ <b>EXECUTION</b>\n{side.upper()} {abs(delta_shares)} {CFG.SYMBOL} @ ${current_price:.2f}"
-                                print(f"[SUCCESS] {log_msg}")
-                                send_telegram(log_msg)
-                        else:
-                            print(f"[RISK REJECT] {msg}")
-                            if "volume" not in msg:
-                                send_telegram(f"🛡 <b>RISK REJECT</b>\n{msg}")
+                                log = f"✅ <b>EXECUTION</b>\n{side.upper()} {abs(delta)} @ ${price:.2f}"
+                                print(f"[SUCCESS] {log}")
+                                send_telegram(log)
+                                # Record Trade
+                                self.trade_history.insert(0, {
+                                    "time": datetime.now().strftime("%H:%M:%S"),
+                                    "symbol": CFG.SYMBOL,
+                                    "side": side.upper(),
+                                    "qty": abs(delta),
+                                    "price": price
+                                })
 
-                    STATE.update(current_regime=regime_info.get('regime', 1))
+                    STATE.update(current_regime=regime.get('regime', 1))
 
                 for _ in range(CFG.POLL_INTERVAL):
                     if not self.running: break
                     time.sleep(1)
-
             except Exception as e:
                 print(f"[ERROR] {e}")
                 time.sleep(60)
 
-    def get_state(self):
+    def get_data(self):
         STATE.load()
         regime_map = {0: "Bear", 1: "Neutral", 2: "Bull"}
         return {
-            "equity": STATE.state.get('equity', 0.0),
-            "cash": STATE.state.get('cash', 0.0),
-            "daily_pnl": STATE.state.get('daily_pnl', 0.0),
-            "total_pnl": STATE.state.get('total_pnl', 0.0),
-            "position_qty": STATE.state.get('position_qty', 0),
-            "current_drawdown": STATE.state.get('current_drawdown', 0.0),
-            "regime": regime_map.get(STATE.state.get('current_regime', 1), "Unknown"),
-            "is_active": self.running,
-            "last_update": STATE.state.get('last_update', "")
+            "state": {
+                "equity": STATE.state.get('equity', 0),
+                "cash": STATE.state.get('cash', 0),
+                "daily_pnl": STATE.state.get('daily_pnl', 0),
+                "regime": regime_map.get(STATE.state.get('current_regime', 1), "Unknown"),
+                "is_active": self.running,
+                "drawdown": STATE.state.get('current_drawdown', 0)
+            },
+            "history": self.equity_history,
+            "trades": self.trade_history[:50]
         }
-
-    def get_logs(self, limit: int = 50):
-        log_dir = Path(CFG.LOG_PATH)
-        files = list(log_dir.glob("*.jsonl"))
-        if not files: return []
-        latest = max(files, key=lambda f: f.stat().st_mtime)
-        logs = []
+    
+    def get_logs(self, limit=50):
+        # ... (Keep existing log logic) ...
         try:
-            with open(latest, 'r') as f:
-                lines = f.readlines()
-                for line in lines[-limit:]:
-                    try: logs.append(json.loads(line))
-                    except: continue
-        except: pass
-        return logs
+            files = list(Path(CFG.LOG_PATH).glob("*.jsonl"))
+            if not files: return []
+            with open(max(files, key=lambda f: f.stat().st_mtime), 'r') as f:
+                return [json.loads(l) for l in f.readlines()[-limit:]]
+        except: return []
 
-    def force_trade(self, symbol, side, qty):
-        res = self.orchestrator.execution_engine.submit_order(symbol, qty, side)
-        if res[0]: send_telegram(f"🕹 <b>MANUAL</b>\n{side.upper()} {qty} {symbol}")
-        return res
+    def force_trade(self, s, side, q):
+        return self.orchestrator.execution_engine.submit_order(s, q, side)
 
 titanium = TitaniumService()
