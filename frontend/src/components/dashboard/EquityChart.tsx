@@ -1,9 +1,14 @@
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
 export function EquityChart({ data }: { data: any[] }) {
+  if (!data || data.length === 0) return <div className="h-full flex items-center justify-center text-gray-500">Waiting for data...</div>;
+
   return (
-    <div className="bg-surface border border-border rounded-lg p-6 shadow-sm h-80">
-      <h3 className="text-sm font-bold text-secondary uppercase tracking-wider mb-4">Live Equity Curve</h3>
+    <div className="card-3d p-6 h-80">
+      <h3 className="text-sm font-bold text-secondary uppercase tracking-wider mb-4 flex items-center gap-2">
+        <span className="w-2 h-2 rounded-full bg-accent animate-pulse"></span>
+        Live Equity Performance
+      </h3>
       <div className="h-64 w-full">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data}>
@@ -14,13 +19,21 @@ export function EquityChart({ data }: { data: any[] }) {
               </linearGradient>
             </defs>
             <XAxis dataKey="timestamp" hide />
-            <YAxis domain={['auto', 'auto']} hide />
+            {/* THIS LINE FIXES THE FLAT GRAPH */}
+            <YAxis domain={['dataMin', 'dataMax']} hide />
             <Tooltip 
-              contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0' }}
-              itemStyle={{ color: '#0F172A' }}
+              contentStyle={{ backgroundColor: '#050505', borderRadius: '8px', border: '1px solid #333' }}
+              itemStyle={{ color: '#fff' }}
               formatter={(value: number) => [`$${value.toLocaleString()}`, 'Equity']}
             />
-            <Area type="monotone" dataKey="value" stroke="#10B981" fillOpacity={1} fill="url(#colorValue)" strokeWidth={2} />
+            <Area 
+              type="monotone" 
+              dataKey="value" 
+              stroke="#10B981" 
+              strokeWidth={3} 
+              fill="url(#colorValue)" 
+              animationDuration={500}
+            />
           </AreaChart>
         </ResponsiveContainer>
       </div>
