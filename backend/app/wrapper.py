@@ -56,11 +56,9 @@ class TitaniumService:
             except: pass
         
         # 2. If empty, generate 10 "Ghost Points" (Flat line)
-        # This ensures the graph ALWAYS has something to draw on startup
         ghost_history = []
         now = datetime.now()
         start_equity = CFG.INITIAL_CAPITAL
-        # Try to get current price if available, else 0
         try: 
             start_price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
         except: 
@@ -184,3 +182,64 @@ class TitaniumService:
                     }
 
                     # EXECUTION
+                    clamped = max(min(signal['position_pct'], 0.40), -0.40)
+                    signal['position_pct'] = clamped
+                    target_val = real_equity * signal['position_pct']
+                    target_qty = int(target_val / price) if price > 0 else 0
+                    delta = target_qty - qty
+                    
+                    if abs(delta * price) > 200:
+                        is_valid, msg = self.orchestrator.risk_manager.validate_order(
+                            CFG.SYMBOL, delta, price, {CFG.SYMBOL: {'value': qty*price}}, real_equity
+                        )
+                        if is_valid:
+                            side = "buy" if delta > 0 else "sell"
+                            success, oid = self.orchestrator.execution_engine.submit_order(CFG.SYMBOL, abs(delta), side)
+                            if success:
+                                STATE.update(position_qty=target_qty)
+                                log = f"✅ <b>EXECUTION</b>\n{side.upper()} {abs(delta)} @ ${price:.2f}"
+                                print(f"[SUCCESS] {log}")
+                                send_telegram(log)
+                                self.trade_history.insert(0, {
+                                    "time": datetime.now().strftime("%H:%M"),
+                                    "symbol": CFG.SYMBOL, "side": side.upper(), "qty": abs(delta), "price": price
+                                })
+
+                    STATE.update(current_regime=regime.get('regime', 1))
+
+                for _ in range(CFG.POLL_INTERVAL):
+                    if not self.running: break
+                    time.sleep(1)
+            except Exception as e:
+                print(f"[ERROR] {e}")
+                time.sleep(60)
+
+    def get_data(self):
+        STATE.load()
+        regime_map = {0: "Bear", 1: "Neutral", 2: "Bull"}
+        return {
+            "state": {
+                "equity": STATE.state.get('equity', 0),
+                "cash": STATE.state.get('cash', 0),
+                "daily_pnl": STATE.state.get('daily_pnl', 0),
+                "regime": regime_map.get(STATE.state.get('current_regime', 1), "Unknown"),
+                "is_active": self.running,
+                "drawdown": STATE.state.get('current_drawdown', 0)
+            },
+            "signal": self.latest_signal,
+            "history": self.equity_history,
+            "trades": self.trade_history
+        }
+    
+    def get_logs(self, limit=50):
+        try:
+            files = list(Path(CFG.LOG_PATH).glob("*.jsonl"))
+            if not files: return []
+            with open(max(files, key=lambda f: f.stat().st_mtime), 'r') as f:
+                return [json.loads(l) for l in f.readlines()[-limit:]]
+        except: return []
+
+    def force_trade(self, s, side, q):
+        return self.orchestrator.execution_engine.submit_order(s, q, side)
+
+titanium = TitaniumService()
