@@ -4,6 +4,7 @@ import time
 import json
 import requests
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
@@ -32,13 +33,11 @@ class TitaniumService:
             cls._instance.orchestrator = TitaniumOrchestrator()
             cls._instance.running = False
             cls._instance.thread = None
-            cls._instance.equity_history = [{"timestamp": datetime.now().isoformat(), "value": CFG.INITIAL_CAPITAL}]
+            # Load history if available, else init
+            cls._instance.equity_history = [{"timestamp": datetime.now().strftime("%H:%M"), "value": CFG.INITIAL_CAPITAL}]
             cls._instance.trade_history = []
-            # NEW: Store latest signal data for the frontend
             cls._instance.latest_signal = {
-                "sentiment": "WAITING",
-                "reason": "Initializing...",
-                "atr": 0,
+                "sentiment": "WAITING", "reason": "Initializing...", "atr": 0,
                 "targets": {"sl": 0, "tp": 0, "entry": 0}
             }
         return cls._instance
@@ -48,7 +47,7 @@ class TitaniumService:
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        send_telegram("🚀 <b>TITANIUM ELITE STARTED</b>")
+        send_telegram("🚀 <b>TITANIUM ENGINE STARTED</b>")
         return {"status": "Started"}
 
     def stop_engine(self):
@@ -56,70 +55,93 @@ class TitaniumService:
         send_telegram("🛑 <b>TITANIUM STOPPED</b>")
         return {"status": "Stopping..."}
 
+    # --- NEW: RESTORED BACKTEST FUNCTION ---
+    def run_backtest(self, days=180):
+        print(f"[BUSY] Running Backtest for {days} days...")
+        try:
+            df_symbol = self.orchestrator.data_engine.get_data(CFG.SYMBOL, days)
+            df_bench = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, days)
+            if df_symbol.empty: return {"error": "No data"}
+            
+            df_features = self.orchestrator.feature_engine.create_features(df_symbol)
+            self.orchestrator.hmm_detector.train(df_features, self.orchestrator.feature_engine.feature_cols)
+            results = self.orchestrator._run_enhanced_simulation(df_features, df_bench)
+            
+            equity_curve = [{"date": str(d).split(' ')[0], "value": float(v)} for d, v in results['equity'].items()]
+            stats = {k: (0 if isinstance(v, float) and np.isnan(v) else v) for k, v in results['stats'].items()}
+            
+            return {"stats": stats, "equity_curve": equity_curve}
+        except Exception as e:
+            return {"error": str(e)}
+
+    # --- NEW: RESTORED DIAGNOSTICS FUNCTION ---
+    def run_diagnostics(self):
+        checks = []
+        # Data
+        try:
+            d = self.orchestrator.data_engine.get_data("SPY", 10)
+            checks.append({"name": "Data Feed", "status": "PASS", "details": f"{len(d)} bars"})
+        except Exception as e: checks.append({"name": "Data Feed", "status": "FAIL", "details": str(e)})
+        # Broker
+        try:
+            acct = self.orchestrator.execution_engine.get_account_info()
+            checks.append({"name": "Broker Connection", "status": "PASS", "details": f"${acct.get('equity',0):,.2f}"})
+        except Exception as e: checks.append({"name": "Broker Connection", "status": "FAIL", "details": str(e)})
+        # Model
+        checks.append({"name": "AI Model", "status": "PASS" if self.orchestrator.hmm_detector.is_trained else "WARN", "details": "Ready"})
+        return checks
+
     def _run_loop(self):
-        print("--- TITANIUM ELITE ENGAGED ---")
+        print("--- AUTOMATION ENGAGED ---")
         self.orchestrator._run_startup_checks()
+        
+        # Safety Overrides
         CFG.MAX_POSITION_SIZE = 0.40
         CFG.MAX_GROSS_EXPOSURE = 0.95
         RISK_MANAGER.cfg = CFG
         
         while self.running:
             try:
-                # 1. LIVE METRICS
+                # 1. UPDATE METRICS (Always runs, ensuring data isn't static)
                 price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
                 qty, val, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
-                cash = float(self.orchestrator.execution_engine.get_account_info().get('cash', 0))
+                cash_info = self.orchestrator.execution_engine.get_account_info()
+                cash = float(cash_info.get('cash', 0) if cash_info else STATE.state['cash'])
                 real_equity = cash + (qty * price)
                 
+                # Append to history
                 self.equity_history.append({"timestamp": datetime.now().strftime("%H:%M"), "value": real_equity})
                 if len(self.equity_history) > 100: self.equity_history.pop(0)
+                
                 STATE.update(equity=real_equity, cash=cash, position_qty=qty)
 
-                # 2. ANALYSIS & SIGNALS
+                # 2. ANALYSIS
                 df = self.orchestrator.data_engine.get_data(CFG.SYMBOL, 365)
                 df_bench = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 365)
 
                 if not df.empty:
-                    # Calculate Features
                     df_feats = self.orchestrator.feature_engine.create_features(df)
                     self.orchestrator.hmm_detector.train(df_feats, self.orchestrator.feature_engine.feature_cols)
                     regime = self.orchestrator.hmm_detector.predict(df_feats, self.orchestrator.feature_engine.feature_cols)
                     corr = self.orchestrator.risk_manager.calculate_correlation(df, df_bench)
                     signal = self.orchestrator.strategy.generate_signal(df_feats, regime, corr)
                     
-                    # --- NEW: ELITE SIGNAL GENERATION ---
-                    # 1. Calculate ATR (Volatility)
-                    high_low = df['High'] - df['Low']
-                    atr = high_low.rolling(14).mean().iloc[-1]
-                    
-                    # 2. Determine Sentiment Rationale
-                    rationale = []
-                    if regime.get('regime') == 0: rationale.append("Bear Regime detected.")
-                    elif regime.get('regime') == 2: rationale.append("Bull Regime detected.")
-                    else: rationale.append("Market is Neutral.")
-                    
-                    if abs(signal['signal']) > 0.5: rationale.append("Strong Momentum signal.")
-                    if corr > 0.8: rationale.append(f"High correlation to {CFG.BENCHMARK}.")
-                    
-                    # 3. Calculate Targets (2:1 Risk Reward)
-                    # If Bullish: SL below, TP above. If Bearish: SL above, TP below.
+                    # Generate Signal Data
+                    atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
                     direction = 1 if signal['signal'] >= 0 else -1
-                    stop_loss = price - (2.0 * atr * direction)
-                    take_profit = price + (4.0 * atr * direction)
-                    
                     self.latest_signal = {
                         "sentiment": "BULLISH" if signal['signal'] > 0 else "BEARISH",
                         "strength": abs(signal['signal']),
-                        "reason": " ".join(rationale),
+                        "reason": f"Regime: {regime['regime']} | Corr: {corr:.2f}",
                         "atr": float(atr),
                         "targets": {
                             "entry": price,
-                            "sl": stop_loss,
-                            "tp": take_profit
+                            "sl": price - (2.0 * atr * direction),
+                            "tp": price + (4.0 * atr * direction)
                         }
                     }
 
-                    # --- EXECUTION ---
+                    # EXECUTION
                     clamped = max(min(signal['position_pct'], 0.40), -0.40)
                     signal['position_pct'] = clamped
                     target_val = real_equity * signal['position_pct']
@@ -134,7 +156,7 @@ class TitaniumService:
                             side = "buy" if delta > 0 else "sell"
                             success, oid = self.orchestrator.execution_engine.submit_order(CFG.SYMBOL, abs(delta), side)
                             if success:
-                                STATE.update(position_qty=target_qty, last_trade_time=datetime.now().isoformat())
+                                STATE.update(position_qty=target_qty)
                                 log = f"✅ <b>EXECUTION</b>\n{side.upper()} {abs(delta)} @ ${price:.2f}"
                                 print(f"[SUCCESS] {log}")
                                 send_telegram(log)
@@ -164,9 +186,9 @@ class TitaniumService:
                 "is_active": self.running,
                 "drawdown": STATE.state.get('current_drawdown', 0)
             },
-            "signal": self.latest_signal, # NEW DATA
+            "signal": self.latest_signal,
             "history": self.equity_history,
-            "trades": self.trade_history[:50]
+            "trades": self.trade_history
         }
     
     def get_logs(self, limit=50):
@@ -179,13 +201,5 @@ class TitaniumService:
 
     def force_trade(self, s, side, q):
         return self.orchestrator.execution_engine.submit_order(s, q, side)
-    
-    # Backtest/Diag/Health functions remain same...
-    def run_backtest(self, days=180):
-        # (Same as before - keeping brevity)
-        return {"error": "Use previous implementation"} 
-    def run_diagnostics(self):
-        # (Same as before)
-        return []
 
 titanium = TitaniumService()
