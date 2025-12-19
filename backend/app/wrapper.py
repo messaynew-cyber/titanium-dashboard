@@ -35,23 +35,24 @@ class TitaniumService:
             cls._instance.orchestrator = TitaniumOrchestrator()
             cls._instance.running = False
             cls._instance.thread = None
-            
             cls._instance.history_file = Path(CFG.STATE_PATH) / "history.json"
             cls._instance.equity_history = cls._instance.load_history()
             cls._instance.trade_history = []
-            cls._instance.latest_signal = {
-                "sentiment": "WAITING", "strength": 0, "reason": "Initializing...", 
-                "targets": {"entry": 0, "sl": 0, "tp": 0}
-            }
+            cls._instance.latest_signal = {"sentiment": "WAITING", "strength": 0, "reason": "Initializing...", "targets": {"entry": 0, "sl": 0, "tp": 0}}
         return cls._instance
 
-    # --- NEW: ON-DEMAND ANALYSIS TOOL ---
+    # NEW: ORDER CLEANER
+    def cancel_open_orders(self):
+        try:
+            self.orchestrator.execution_engine.client.cancel_orders()
+            print("[INFO] Cleared open orders to prevent conflicts.")
+        except: pass
+
     def generate_signal_now(self):
         print("[USER COMMAND] Scanning Market...")
         try:
             df = self.orchestrator.data_engine.get_data(CFG.SYMBOL, 365)
             df_bench = self.orchestrator.data_engine.get_data(CFG.BENCHMARK, 365)
-            
             if df.empty: return {"error": "Data fetch failed"}
 
             df_feats = self.orchestrator.feature_engine.create_features(df)
@@ -68,11 +69,7 @@ class TitaniumService:
                 "sentiment": "BULLISH" if signal['signal'] > 0 else "BEARISH",
                 "strength": abs(signal['signal']),
                 "reason": f"Regime {regime['regime']} ({regime['confidence']:.2f}) | Corr: {corr:.2f}",
-                "targets": {
-                    "entry": price,
-                    "sl": price - (2.0 * atr * direction),
-                    "tp": price + (4.0 * atr * direction)
-                },
+                "targets": {"entry": price, "sl": price - (2.0*atr*direction), "tp": price + (4.0*atr*direction)},
                 "timestamp": datetime.now().strftime("%H:%M:%S")
             }
             self.latest_signal = new_signal
@@ -87,7 +84,6 @@ class TitaniumService:
                     if len(data) > 2: return data[-200:]
             except: pass
         
-        # GHOST DATA GENERATOR (Fixes Flat Charts)
         ghost_data = []
         now = datetime.now()
         base = CFG.INITIAL_CAPITAL
@@ -96,12 +92,7 @@ class TitaniumService:
 
         for i in range(50, 0, -1):
             t = (now - timedelta(minutes=i*15)).strftime("%H:%M")
-            # Jitter
-            jitter_eq = random.uniform(-10, 10)
-            jitter_pr = random.uniform(-0.5, 0.5)
-            ghost_data.append({
-                "timestamp": t, "value": base + jitter_eq, "price": price + jitter_pr
-            })
+            ghost_data.append({"timestamp": t, "value": base + random.uniform(-10, 10), "price": price + random.uniform(-0.5, 0.5)})
         return ghost_data
 
     def save_history(self):
@@ -129,10 +120,7 @@ class TitaniumService:
             feats = self.orchestrator.feature_engine.create_features(df)
             self.orchestrator.hmm_detector.train(feats, self.orchestrator.feature_engine.feature_cols)
             res = self.orchestrator._run_enhanced_simulation(feats, bench)
-            return {
-                "stats": res['stats'],
-                "equity_curve": [{"date": str(d).split(' ')[0], "value": float(v)} for d, v in res['equity'].items()]
-            }
+            return {"stats": res['stats'], "equity_curve": [{"date": str(d).split(' ')[0], "value": float(v)} for d, v in res['equity'].items()]}
         except Exception as e: return {"error": str(e)}
 
     def run_diagnostics(self):
@@ -154,14 +142,13 @@ class TitaniumService:
         
         while self.running:
             try:
-                # METRICS & HISTORY
+                # METRICS
                 price = self.orchestrator.execution_engine.get_price(CFG.SYMBOL)
                 qty, _, _ = self.orchestrator.execution_engine.get_position(CFG.SYMBOL)
                 acct = self.orchestrator.execution_engine.get_account_info()
                 cash = float(acct.get('cash', 0) if acct else STATE.state.get('cash', 0))
-                
-                # Real Equity + Heartbeat Jitter (+/- $2.00)
                 real_equity = cash + (qty * price)
+                
                 visual_equity = real_equity + random.uniform(-2.0, 2.0)
                 visual_price = price + random.uniform(-0.05, 0.05)
                 
@@ -175,8 +162,8 @@ class TitaniumService:
                 self.save_history()
                 STATE.update(equity=real_equity, cash=cash, position_qty=qty)
 
-                # AUTOPILOT LOGIC
-                sig_data = self.generate_signal_now() # Re-use Signal Logic
+                # AUTOPILOT
+                sig_data = self.generate_signal_now()
                 
                 if "error" not in sig_data:
                     target_pct = 0.40 if sig_data['sentiment'] == 'BULLISH' else -0.40
@@ -184,6 +171,9 @@ class TitaniumService:
                     delta = target_qty - qty
                     
                     if abs(delta * price) > 200:
+                        # CLEAN UP OLD ORDERS FIRST
+                        self.cancel_open_orders()
+                        
                         side = "buy" if delta > 0 else "sell"
                         success, oid = self.orchestrator.execution_engine.submit_order(CFG.SYMBOL, abs(delta), side)
                         if success:
@@ -212,6 +202,8 @@ class TitaniumService:
         except: return []
 
     def force_trade(self, s, side, q):
+        # Clean up before forcing
+        self.cancel_open_orders()
         return self.orchestrator.execution_engine.submit_order(s, q, side)
 
 titanium = TitaniumService()
