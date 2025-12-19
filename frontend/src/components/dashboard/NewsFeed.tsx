@@ -7,6 +7,7 @@ export function NewsFeed() {
   useEffect(() => {
     const fetchNews = async () => {
       try {
+        // Using a public RSS to JSON bridge
         const res = await fetch('https://api.rss2json.com/v1/api.json?rss_url=https://finance.yahoo.com/news/rssindex');
         const data = await res.json();
         setNews(data.items.slice(0, 5));
@@ -22,7 +23,7 @@ export function NewsFeed() {
           <Newspaper size={14} /> Market Intelligence
         </h3>
       </div>
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
         {news.map((item, i) => (
           <a key={i} href={item.link} target="_blank" rel="noreferrer" className="block group">
             <div className="flex gap-4 items-start">
@@ -31,9 +32,9 @@ export function NewsFeed() {
                   {item.title}
                 </h4>
                 <div className="flex items-center gap-1 mt-1 text-[10px] text-gray-500">
-                  <span>{new Date(item.pubDate).toLocaleTimeString()}</span>
-                  <span>•</span>
-                  <span className="flex items-center gap-1 group-hover:text-accent">Read <ExternalLink size={8}/></span>
+                  <span>{new Date(item.pubDate).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                  <span className="text-gray-700">•</span>
+                  <span className="flex items-center gap-1 group-hover:text-accent transition">Read <ExternalLink size={8}/></span>
                 </div>
               </div>
             </div>
