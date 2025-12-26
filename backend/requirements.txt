@@ -13,7 +13,10 @@ aiosqlite
 tenacity
 aiolimiter
 aiohttp
+aiofiles
 psutil
 python-dotenv
 pandas_market_calendars
 joblib
+requests
+backoff
