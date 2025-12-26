@@ -2099,73 +2099,73 @@ class MultiTimeframeDataEngine:
         return True
 
     async def _fetch_twelvedata(self, timeframe: str) -> bool:
-       """Fetch from TwelveData with circuit breaker, rate limiting, and outputsize validation"""
-    try:
-        td_intervals = {"1d": "1day", "4h": "4h", "1h": "1h", "15m": "15min"}
-        if timeframe not in td_intervals:
+        """Fetch from TwelveData with circuit breaker, rate limiting, and outputsize validation"""
+        try:
+            td_intervals = {"1d": "1day", "4h": "4h", "1h": "1h", "15m": "15min"}
+            if timeframe not in td_intervals:
+                return False
+
+            interval = td_intervals[timeframe]
+
+            url = "https://api.twelvedata.com/time_series"
+            params = {
+                "symbol": self.symbol,
+                "interval": interval,
+                "apikey": self.api_key,
+                "order": "ASC"
+            }
+
+            # Smart adjustment: Ask for realistic amounts of data
+            if timeframe == "1d":
+                params["outputsize"] = 500  # 500 days of daily data
+            elif timeframe == "4h":
+                params["outputsize"] = 800  # ~133 days of 4h data
+            elif timeframe == "1h":
+                params["outputsize"] = 1200  # ~50 days of 1h data
+            else:  # "15m"
+                params["outputsize"] = 2000  # ~21 days of 15m data
+
+            await self._ensure_session()
+            async with self.session.get(url, params=params) as response:
+                data = await response.json()
+
+                if "values" not in data:
+                    await self._record_failure("twelvedata")
+                    app_logger.error(
+                        f"TwelveData error: {data.get('message', 'Unknown error')}")
+                    return False
+
+                values = data["values"]
+                if not values or len(values) < 50:
+                    app_logger.warning(
+                        f"TwelveData returned insufficient data for {timeframe}")
+                    return False
+
+                df = pd.DataFrame(values)
+                df['datetime'] = pd.to_datetime(df['datetime'])
+                df.set_index('datetime', inplace=True)
+
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                df.columns = [c.lower() for c in df.columns]
+                df = df.dropna()
+
+                if df.empty or len(df) < 50:
+                    return False
+
+                self.dataframes[timeframe] = await self._engineer_features(df, timeframe)
+                await self._record_success("twelvedata")
+                return True
+
+        except aiohttp.ClientError as e:
+            app_logger.error(f"TwelveData network error: {e}")
+            await self._record_failure("twelvedata")
             return False
-
-        interval = td_intervals[timeframe]
-
-        url = "https://api.twelvedata.com/time_series"
-        params = {
-            "symbol": self.symbol,
-            "interval": interval,
-            "apikey": self.api_key,
-            "order": "ASC"
-        }
-
-        # Smart adjustment: Ask for realistic amounts of data
-        if timeframe == "1d":
-            params["outputsize"] = 500  # 500 days of daily data
-        elif timeframe == "4h":
-            params["outputsize"] = 800  # ~133 days of 4h data
-        elif timeframe == "1h":
-            params["outputsize"] = 1200  # ~50 days of 1h data
-        else:  # "15m"
-            params["outputsize"] = 2000  # ~21 days of 15m data
-
-        await self._ensure_session()
-        async with self.session.get(url, params=params) as response:
-            data = await response.json()
-
-            if "values" not in data:
-                await self._record_failure("twelvedata")
-                app_logger.error(
-                    f"TwelveData error: {data.get('message', 'Unknown error')}")
-                return False
-
-            values = data["values"]
-            if not values or len(values) < 50:
-                app_logger.warning(
-                    f"TwelveData returned insufficient data for {timeframe}")
-                return False
-
-            df = pd.DataFrame(values)
-            df['datetime'] = pd.to_datetime(df['datetime'])
-            df.set_index('datetime', inplace=True)
-
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-            df.columns = [c.lower() for c in df.columns]
-            df = df.dropna()
-
-            if df.empty or len(df) < 50:
-                return False
-
-            self.dataframes[timeframe] = await self._engineer_features(df, timeframe)
-            await self._record_success("twelvedata")
-            return True
-
-    except aiohttp.ClientError as e:
-        app_logger.error(f"TwelveData network error: {e}")
-        await self._record_failure("twelvedata")
-        return False
-    except Exception as e:
-        app_logger.error(f"TwelveData failed: {e}")
-        await self._record_failure("twelvedata")
-        return False
+        except Exception as e:
+            app_logger.error(f"TwelveData failed: {e}")
+            await self._record_failure("twelvedata")
+            return False
 
     async def _fetch_yfinance(self, timeframe: str) -> bool:
         """Fetch from yFinance as fallback with timeframe-aware historical limits"""
@@ -4652,4 +4652,3 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         app_logger.info("Process interrupted by user")
         sys.exit(0)
-
