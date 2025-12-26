@@ -18,7 +18,7 @@ except ImportError as e:
     print(f"CRITICAL: Could not import Bot. {e}")
     sys.exit(1)
 
-# LOGGING CAPTURE (To show logs on Dashboard)
+# LOGGING CAPTURE
 log_capture = []
 class ListHandler(logging.Handler):
     def emit(self, record):
@@ -30,8 +30,7 @@ class ListHandler(logging.Handler):
         log_capture.append(log_entry)
         if len(log_capture) > 100: log_capture.pop(0)
 
-# Attach handler to the bot's logger
-bot_logger = logging.getLogger("TITANIUM")  # Must match the logger name in titanium_bot.py
+bot_logger = logging.getLogger("TITANIUM")
 bot_logger.addHandler(ListHandler())
 
 class TitaniumService:
@@ -44,12 +43,15 @@ class TitaniumService:
             cls._instance.running = False
             
             # CONFIGURATION
-            # We override paths to ensure they work in the container
             cls._instance.db_path = "/app/TITANIUM_V1_FIXED/titanium_production.db"
+            
+            # INJECT REQUIRED SECRET HERE
             cls._instance.conf = SystemConfig(
                 DB_PATH=cls._instance.db_path,
                 DB_BACKUP_PATH="/app/TITANIUM_V1_FIXED/backups",
-                LIVE_LOOP_INTERVAL_SECONDS=180 # 3 mins
+                LIVE_LOOP_INTERVAL_SECONDS=180,
+                # YOUR SPECIFIC SIGNATURE KEY
+                MODEL_SIGNATURE_SECRET="269a0bf8c33f415b7ad64bbc70fcc3e4643ee7aec467cb4c9d737acb2731239e" 
             )
         return cls._instance
 
@@ -90,16 +92,8 @@ class TitaniumService:
     async def _run_bot_loop(self):
         """Wraps the bot's infinite loop"""
         try:
-            # We mock the shutdown event for the bot
             shutdown_event = asyncio.Event()
-            
-            # Initialize components
             await self.system.initialize()
-            
-            # Run the actual bot loop
-            # Note: We are importing the internal _live_loop from the module scope if possible, 
-            # or calling the method if the user structure allows. 
-            # Based on your file, we need to replicate the main() logic slightly.
             
             from algo.titanium_bot import _live_loop
             await _live_loop(
@@ -118,7 +112,6 @@ class TitaniumService:
         """Manually execute via the Executor"""
         if not self.system: await self.initialize()
         
-        # Create a fake signal for the executor
         signal = {
             "action": side.upper(),
             "timeframe": "manual",
@@ -147,15 +140,19 @@ class TitaniumService:
         risk = await self.system.db.get_daily_risk(today)
         if risk:
             equity = float(risk['portfolio_value'])
-            daily_pnl = float(risk['daily_loss']) # In the bot logic, loss is tracked, we might need to invert or check logic
+            # Convert decimal to float safely
+            daily_pnl = float(risk['daily_loss']) 
             drawdown = float(risk['max_drawdown'])
 
         # 2. Get Latest Signal (Regime)
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM signals ORDER BY timestamp DESC LIMIT 1") as cursor:
-                row = await cursor.fetchone()
-                if row: regime = row['regime']
+            # Check if table exists first to avoid crash on fresh init
+            try:
+                async with db.execute("SELECT * FROM signals ORDER BY timestamp DESC LIMIT 1") as cursor:
+                    row = await cursor.fetchone()
+                    if row: regime = row['regime']
+            except: pass
 
         # 3. Get Trades
         trades_list = []
@@ -170,9 +167,7 @@ class TitaniumService:
              })
 
         # 4. Generate Equity History (for Chart)
-        # We query the daily_risk table or performance metrics to build a curve
         history = []
-        # If DB is empty, send ghost data
         history.append({"timestamp": datetime.now().strftime("%H:%M"), "value": equity})
 
         # Signal Card Data
@@ -190,18 +185,20 @@ class TitaniumService:
                 "drawdown": drawdown
             },
             "signal": latest_sig,
-            "history": history, # In V2 we will query historical table
+            "history": history,
             "trades": trades_list
         }
 
     def get_logs(self, limit=50):
-        # Return captured logs from memory
         return log_capture[-limit:]
 
     # Pass-throughs
     async def run_backtest(self, days=180):
         if not self.system: await self.initialize()
+        
+        # Run the backtest in a thread to prevent blocking
         res = await asyncio.to_thread(self.system.backtester.run_walk_forward)
+        
         if not res: return {"error": "Backtest failed"}
         
         # Format for frontend
@@ -211,7 +208,7 @@ class TitaniumService:
                 "total_return": res['Total Return'],
                 "sharpe_ratio": res['Sharpe'],
                 "max_drawdown": res['Max DD'],
-                "total_trades": 0 # Not provided in summary
+                "total_trades": 0 
             },
             "equity_curve": curve
         }
