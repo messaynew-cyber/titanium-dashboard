@@ -32,6 +32,7 @@ class ListHandler(logging.Handler):
         log_capture.append(log_entry)
         if len(log_capture) > 100: log_capture.pop(0)
 
+# DEFINE LOGGER CORRECTLY
 bot_logger = logging.getLogger("TITANIUM")
 bot_logger.addHandler(ListHandler())
 
@@ -188,7 +189,7 @@ class TitaniumService:
             data["history"] = self.equity_history
 
         except Exception as e:
-            logger.error(f"Data Fetch Error: {e}")
+            bot_logger.error(f"Data Fetch Error: {e}")
             
         return data
 
