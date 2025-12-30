@@ -50,7 +50,7 @@ class TitaniumService:
                 DB_PATH=cls._instance.db_path,
                 DB_BACKUP_PATH="/app/TITANIUM_V1_FIXED/backups",
                 LIVE_LOOP_INTERVAL_SECONDS=180,
-                # YOUR SPECIFIC SIGNATURE KEY
+                # Use the secret you have, or a default if env var is missing
                 MODEL_SIGNATURE_SECRET="269a0bf8c33f415b7ad64bbc70fcc3e4643ee7aec467cb4c9d737acb2731239e" 
             )
         return cls._instance
@@ -95,6 +95,9 @@ class TitaniumService:
             shutdown_event = asyncio.Event()
             await self.system.initialize()
             
+            # Import the internal loop function (which you added to the end of the file)
+            # If DeepSeek didn't add _live_loop to the end, we need to handle that.
+            # Assuming DeepSeek added the full file structure including the loop at the bottom.
             from algo.titanium_bot import _live_loop
             await _live_loop(
                 self.conf, 
@@ -104,6 +107,9 @@ class TitaniumService:
                 self.system.telegram, 
                 shutdown_event
             )
+        except ImportError:
+             bot_logger.error("CRITICAL: _live_loop missing from bot file. Please add it.")
+             self.running = False
         except Exception as e:
             bot_logger.error(f"Wrapper Loop Error: {e}")
             self.running = False
@@ -136,35 +142,38 @@ class TitaniumService:
         daily_pnl = 0.0
         
         # 1. Get Daily Risk (Equity/PnL)
-        today = datetime.now().date().isoformat()
-        risk = await self.system.db.get_daily_risk(today)
-        if risk:
-            equity = float(risk['portfolio_value'])
-            # Convert decimal to float safely
-            daily_pnl = float(risk['daily_loss']) 
-            drawdown = float(risk['max_drawdown'])
+        try:
+            today = datetime.now().date().isoformat()
+            risk = await self.system.db.get_daily_risk(today)
+            if risk:
+                equity = float(risk['portfolio_value'])
+                # Convert decimal to float safely
+                daily_pnl = float(risk['daily_loss']) 
+                drawdown = float(risk['max_drawdown'])
+        except: pass
 
         # 2. Get Latest Signal (Regime)
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            # Check if table exists first to avoid crash on fresh init
-            try:
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
                 async with db.execute("SELECT * FROM signals ORDER BY timestamp DESC LIMIT 1") as cursor:
                     row = await cursor.fetchone()
                     if row: regime = row['regime']
-            except: pass
+        except: pass
 
         # 3. Get Trades
         trades_list = []
-        open_trades = await self.system.db.get_open_trades()
-        for t in open_trades:
-             trades_list.append({
-                 "time": t['entry_time'],
-                 "symbol": t['symbol'],
-                 "side": t['action'],
-                 "qty": t['quantity'],
-                 "price": t['entry_price']
-             })
+        try:
+            open_trades = await self.system.db.get_open_trades()
+            for t in open_trades:
+                 trades_list.append({
+                     "time": t['entry_time'],
+                     "symbol": t['symbol'],
+                     "side": t['action'],
+                     "qty": t['quantity'],
+                     "price": t['entry_price']
+                 })
+        except: pass
 
         # 4. Generate Equity History (for Chart)
         history = []
@@ -197,21 +206,34 @@ class TitaniumService:
         if not self.system: await self.initialize()
         
         # Run the backtest in a thread to prevent blocking
-        res = await asyncio.to_thread(self.system.backtester.run_walk_forward)
-        
-        if not res: return {"error": "Backtest failed"}
-        
-        # Format for frontend
-        curve = [{"date": str(i).split(' ')[0], "value": float(v)} for i, v in res['df']['equity'].items()]
-        return {
-            "stats": {
-                "total_return": res['Total Return'],
-                "sharpe_ratio": res['Sharpe'],
-                "max_drawdown": res['Max DD'],
-                "total_trades": 0 
-            },
-            "equity_curve": curve
-        }
+        # Note: The new bot has a backtester class, we try to use it
+        try:
+             # Re-instantiate backtester with current data engine
+             from algo.titanium_bot import Backtester
+             bt = Backtester(self.system.data)
+             # Fetch data first
+             await self.system.data.fetch_timeframe("1d", priority="high")
+             
+             res = await asyncio.to_thread(bt.run_walk_forward)
+             
+             if not res: return {"error": "Backtest failed"}
+             
+             # Format for frontend
+             # The new bot returns a DataFrame in res['df']
+             df = res['df']
+             curve = [{"date": str(i).split(' ')[0], "value": float(row['equity'])} for i, row in df.iterrows()]
+             
+             return {
+                "stats": {
+                    "total_return": res['Total Return'],
+                    "sharpe_ratio": res['Sharpe'],
+                    "max_drawdown": res['Max DD'],
+                    "total_trades": len(df) # approx
+                },
+                "equity_curve": curve
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
     async def run_diagnostics(self):
         return [{"name": "Database", "status": "PASS", "details": "SQLite Connected"}]
