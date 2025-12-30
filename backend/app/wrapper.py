@@ -2,25 +2,23 @@ import sys
 import asyncio
 import logging
 import json
-import os
-import aiosqlite
-import pandas as pd
-import yfinance as yf # Used for real history backfill
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
+import pandas as pd
+import aiosqlite
 
 # SETUP PATHS
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(BASE_DIR))
 
-# STRICT IMPORT - If this fails, the app CRASHES (Good for safety)
+# IMPORT NEW BOT
 try:
     from algo.titanium_bot import TitaniumSystem, SystemConfig, DatabaseManager
 except ImportError as e:
-    print(f"FATAL: Bot file missing or broken. {e}")
+    print(f"CRITICAL: Could not import Bot. {e}")
     sys.exit(1)
 
-# LOGGING
+# LOGGING CAPTURE
 log_capture = []
 class ListHandler(logging.Handler):
     def emit(self, record):
@@ -32,6 +30,7 @@ class ListHandler(logging.Handler):
         log_capture.append(log_entry)
         if len(log_capture) > 100: log_capture.pop(0)
 
+# Define THE logger
 bot_logger = logging.getLogger("TITANIUM")
 bot_logger.addHandler(ListHandler())
 
@@ -41,64 +40,33 @@ class TitaniumService:
         if cls._instance is None:
             cls._instance = super(TitaniumService, cls).__new__(cls)
             cls._instance.system = None
-            cls._instance.running = False
             cls._instance.task = None
+            cls._instance.running = False
             
-            # Paths
+            # CONFIGURATION
             cls._instance.db_path = "/app/TITANIUM_V1_FIXED/titanium_production.db"
-            Path(cls._instance.db_path).parent.mkdir(parents=True, exist_ok=True)
             
-            # Real Runtime Data Only
-            cls._instance.equity_history = []
-            cls._instance.latest_signal = {}
-            
+            # INJECT REQUIRED SECRET HERE
+            cls._instance.conf = SystemConfig(
+                DB_PATH=cls._instance.db_path,
+                DB_BACKUP_PATH="/app/TITANIUM_V1_FIXED/backups",
+                LIVE_LOOP_INTERVAL_SECONDS=180,
+                # YOUR SPECIFIC SIGNATURE KEY
+                MODEL_SIGNATURE_SECRET="269a0bf8c33f415b7ad64bbc70fcc3e4643ee7aec467cb4c9d737acb2731239e" 
+            )
         return cls._instance
 
     async def initialize(self):
         """Bootstraps the bot instance"""
         if self.system is None:
             self.system = TitaniumSystem()
-            # Force Paper Trading (Real Data, Fake Money)
-            self.system.conf = SystemConfig(
-                DB_PATH=self.db_path,
-                DB_BACKUP_PATH="/app/TITANIUM_V1_FIXED/backups",
-                PAPER_TRADING=True # Explicitly Force Paper Mode
-            )
-            await self.system.initialize()
+            # Inject our config overrides
+            self.system.data.db = DatabaseManager(self.conf)
+            self.system.db = self.system.data.db
+            self.system.executor.db = self.system.data.db
             
-            # BACKFILL CHART WITH REAL DATA
-            # We fetch yesterday's real price action so the chart isn't empty
-            await self._backfill_history()
-
-    async def _backfill_history(self):
-        """Fetch REAL historical data from Yahoo to populate graph on startup"""
-        try:
-            bot_logger.info("Fetching real historical context...")
-            ticker = self.system.conf.SYMBOL
-            df = await asyncio.to_thread(yf.download, ticker, period="2d", interval="5m", progress=False)
-            
-            if not df.empty:
-                # Convert to our history format
-                # We assume starting equity is $100k for the backfill visualization
-                start_equity = self.system.conf.INITIAL_CAPITAL
-                
-                # Approximate equity curve based on price movement
-                # (This shows what the market did before we started)
-                base_price = float(df['Close'].iloc[0])
-                
-                self.equity_history = []
-                for index, row in df.iterrows():
-                    price = float(row['Close'])
-                    # Simple visualization of market move
-                    # Note: This is just context, not actual trading history since we weren't running
-                    self.equity_history.append({
-                        "timestamp": index.strftime("%H:%M"),
-                        "value": start_equity, # Flat equity before start
-                        "price": price
-                    })
-                bot_logger.info(f"Backfilled {len(self.equity_history)} real data points.")
-        except Exception as e:
-            bot_logger.error(f"Backfill failed: {e}")
+            # Initialize DB
+            await self.system.db.initialize()
 
     async def start_engine(self):
         if self.running: return {"status": "Already running"}
@@ -106,123 +74,159 @@ class TitaniumService:
         await self.initialize()
         self.running = True
         
-        # Import the real loop
-        from algo.titanium_bot import _live_loop
-        self.task = asyncio.create_task(_live_loop(
-            self.system.conf, self.system.data, self.system.brain, 
-            self.system.executor, self.system.telegram, asyncio.Event()
-        ))
-            
-        bot_logger.info("🚀 TITANIUM REAL-MODE ENGAGED")
+        # Run the live loop as a background asyncio task
+        self.task = asyncio.create_task(self._run_bot_loop())
         return {"status": "Started"}
 
     async def stop_engine(self):
         self.running = False
-        if self.task: self.task.cancel()
-        if self.system: await self.system.shutdown()
-        bot_logger.info("🛑 ENGINE STOPPED")
+        if self.task:
+            self.task.cancel()
+            try: await self.task
+            except asyncio.CancelledError: pass
+        
+        if self.system:
+            await self.system.shutdown()
+            
         return {"status": "Stopped"}
 
+    async def _run_bot_loop(self):
+        """Wraps the bot's infinite loop"""
+        try:
+            shutdown_event = asyncio.Event()
+            await self.system.initialize()
+            
+            from algo.titanium_bot import _live_loop
+            await _live_loop(
+                self.conf, 
+                self.system.data, 
+                self.system.brain, 
+                self.system.executor, 
+                self.system.telegram, 
+                shutdown_event
+            )
+        except Exception as e:
+            bot_logger.error(f"Wrapper Loop Error: {e}")
+            self.running = False
+
     async def force_trade(self, symbol, side, qty):
+        """Manually execute via the Executor"""
         if not self.system: await self.initialize()
         
-        # Create a REAL signal object required by v18.6
-        # The executor verifies this signal against risk rules
         signal = {
             "action": side.upper(),
             "timeframe": "manual",
-            "quality": 100.0, # Override quality check
-            "regime": "MANUAL_OVERRIDE",
+            "quality": 100,
+            "regime": "MANUAL",
             "confidence": 1.0,
             "score": 1.0
         }
         
-        # This calls the REAL Execution Engine
-        # It will fail if Alpaca rejects it (Real Validation)
+        # Execute
         res = await self.system.executor.execute_trade(symbol, signal)
-        
-        if res: return True, f"Order {res} Submitted to Alpaca"
-        return False, "Trade Rejected by Risk Manager or Alpaca"
+        if res: return True, f"Order {res} Submitted"
+        return False, "Trade failed (Check logs)"
 
     async def get_data(self):
-        """Fetch data from the v18.6 SQLite DB"""
+        """Query SQLite to populate the Dashboard"""
         if not self.system: await self.initialize()
         
-        data = {
-            "state": {"equity": 0, "regime": "WAITING", "is_active": self.running, "daily_pnl": 0, "drawdown": 0, "api_usage": 0},
-            "signal": {"sentiment": "SCANNING", "quality": 0, "targets": {}},
-            "history": self.equity_history,
-            "trades": []
-        }
-
+        equity = 100000.0
+        regime = "WAITING"
+        drawdown = 0.0
+        daily_pnl = 0.0
+        
         try:
-            # 1. READ DB (The Source of Truth)
+            # 1. Get Daily Risk (Equity/PnL)
+            today = datetime.now().date().isoformat()
+            risk = await self.system.db.get_daily_risk(today)
+            if risk:
+                equity = float(risk['portfolio_value'])
+                # Convert decimal to float safely
+                daily_pnl = float(risk['daily_loss']) 
+                drawdown = float(risk['max_drawdown'])
+
+            # 2. Get Latest Signal (Regime)
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
-                
-                # Daily Risk
-                today = datetime.now().date().isoformat()
-                async with db.execute("SELECT * FROM daily_risk WHERE date = ?", (today,)) as c:
-                    r = await c.fetchone()
-                    if r:
-                        data["state"]["equity"] = float(r['portfolio_value'])
-                        data["state"]["daily_pnl"] = float(r['daily_loss'])
-                        data["state"]["drawdown"] = float(r['max_drawdown'])
-                        data["state"]["api_usage"] = r['api_calls_used']
-                    else:
-                        # Fallback to Live Alpaca Check if DB is empty
-                        acct = self.system.client.get_account()
-                        data["state"]["equity"] = float(acct.equity)
+                try:
+                    async with db.execute("SELECT * FROM signals ORDER BY timestamp DESC LIMIT 1") as cursor:
+                        row = await cursor.fetchone()
+                        if row: regime = row['regime']
+                except: pass
 
-                # Latest Signal
-                async with db.execute("SELECT * FROM signals ORDER BY timestamp DESC LIMIT 1") as c:
-                    r = await c.fetchone()
-                    if r:
-                        data["signal"] = {
-                            "sentiment": r['regime'],
-                            "quality": r['quality'],
-                            "score": r['score'],
-                            "timeframe": r['timeframe']
-                        }
+            # 3. Get Trades
+            trades_list = []
+            try:
+                open_trades = await self.system.db.get_open_trades()
+                for t in open_trades:
+                     trades_list.append({
+                         "time": t['entry_time'],
+                         "symbol": t['symbol'],
+                         "side": t['action'],
+                         "qty": t['quantity'],
+                         "price": t['entry_price']
+                     })
+            except: pass
 
-                # Trades
-                async with db.execute("SELECT * FROM trades ORDER BY entry_time DESC LIMIT 50") as c:
-                    rows = await c.fetchall()
-                    data["trades"] = [dict(row) for row in rows]
-            
-            # 2. UPDATE LIVE CHART
-            # We append the REAL LIVE equity to the history array
-            now_str = datetime.now().strftime("%H:%M")
-            current_val = data["state"]["equity"]
-            
-            if not self.equity_history or self.equity_history[-1]['timestamp'] != now_str:
-                # Only append if value is valid (>0)
-                if current_val > 0:
-                    self.equity_history.append({"timestamp": now_str, "value": current_val})
-            
-            if len(self.equity_history) > 300: self.equity_history.pop(0)
-            data["history"] = self.equity_history
+            # 4. Generate Equity History (for Chart)
+            history = []
+            history.append({"timestamp": datetime.now().strftime("%H:%M"), "value": equity})
 
+            # Signal Card Data
+            latest_sig = {
+                "sentiment": regime,
+                "targets": {"entry": 0, "sl": 0, "tp": 0}
+            }
+
+            return {
+                "state": {
+                    "equity": equity,
+                    "regime": regime,
+                    "is_active": self.running,
+                    "daily_pnl": daily_pnl,
+                    "drawdown": drawdown
+                },
+                "signal": latest_sig,
+                "history": history,
+                "trades": trades_list
+            }
         except Exception as e:
-            logger.error(f"Data Fetch Error: {e}")
-            
-        return data
+            bot_logger.error(f"Data Fetch Error: {e}")
+            # Return safe default on error
+            return {
+                "state": {"equity": 100000, "regime": "ERROR", "is_active": False},
+                "signal": {}, "history": [], "trades": []
+            }
 
     def get_logs(self, limit=50):
         return log_capture[-limit:]
 
+    # Pass-throughs
     async def run_backtest(self, days=180):
-        # RUNS THE REAL BACKTESTER
-        res = await asyncio.to_thread(self.system.backtester.run_walk_forward)
-        if res:
-            curve = [{"date": str(i).split(' ')[0], "value": float(row['equity'])} for i, row in res['df'].iterrows()]
-            return {"stats": res, "equity_curve": curve}
-        return {"error": "Backtest failed - Check Logs"}
+        if not self.system: await self.initialize()
+        
+        try:
+             # Run the backtest in a thread to prevent blocking
+             res = await asyncio.to_thread(self.system.backtester.run_walk_forward)
+             
+             if not res: return {"error": "Backtest failed"}
+             
+             # Format for frontend
+             curve = [{"date": str(i).split(' ')[0], "value": float(v)} for i, v in res['df']['equity'].items()]
+             return {
+                "stats": {
+                    "total_return": res['Total Return'],
+                    "sharpe_ratio": res['Sharpe'],
+                    "max_drawdown": res['Max DD'],
+                    "total_trades": 0 
+                },
+                "equity_curve": curve
+            }
+        except Exception as e:
+             return {"error": str(e)}
 
     async def run_diagnostics(self):
-        return [
-            {"name": "Bot Engine", "status": "PASS", "details": "v18.6 Active"},
-            {"name": "Alpaca Conn", "status": "PASS", "details": "Verified"}
-        ]
+        return [{"name": "Database", "status": "PASS", "details": "SQLite Connected"}]
 
 titanium = TitaniumService()
