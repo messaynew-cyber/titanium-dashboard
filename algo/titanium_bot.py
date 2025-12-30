@@ -1,4 +1,3 @@
-
 # **TITANIUM v19-PROD-ENHANCED - Complete Fixed Version**
 
 # ===============================================================================
@@ -3202,64 +3201,110 @@ class ExecutionEngine:
             raise AccountBlockedError(f"Could not validate account: {e}")
 
     async def _reconcile_active_orders(self):
-    """V19 FIXED: Check broker for active orders vs our state - CORRECTED with proper status filtering"""
-    try:
-        # V19 FIX: Only fetch NON-TERMINAL orders from broker to match our DB query
-        request = GetOrdersRequest(status='open')  # Changed from 'all' to 'open'
-        
-        async with self.execution_circuit_breaker:
-            broker_orders = await asyncio.to_thread(self.client.get_orders, request)
-        
-        broker_order_ids: Set[str] = {o.id for o in broker_orders}
-        
-        # Load our active orders from DB (already excludes terminal states)
-        our_active_orders = await self.db.get_active_orders()
-        our_order_ids: Set[str] = {o['order_id'] for o in our_active_orders}
-        
-        # Cancel orders we track but broker doesn't have (ghost orders)
-        for order_id in our_order_ids - broker_order_ids:
-            app_logger.warning(f"Ghost order {order_id} removed from tracking")
-            await self.db.update_active_order(order_id, "CANCELED")
-            async with self.order_lock:
-                self.active_orders.pop(order_id, None)
-        
-        # Add orders broker has but we don't track (with status validation)
-        for order in broker_orders:
-            if order.id not in our_order_ids:
-                # V19 FIX: Validate order status before logging
+        """FIXED: Check broker for active orders vs our state - COMPLETE FIX for infinite loop"""
+        try:
+            # Get ALL orders from broker
+            request = GetOrdersRequest(status='all')
+
+            async with self.execution_circuit_breaker:
+                broker_orders = await asyncio.to_thread(self.client.get_orders, request)
+
+            # Create a map of broker order id to order for easy lookup
+            broker_order_map = {o.id: o for o in broker_orders}
+            broker_order_ids = set(broker_order_map.keys())
+
+            # Load our active orders from DB (non-terminal states)
+            our_active_orders = await self.db.get_active_orders()
+            our_order_ids = {o['order_id'] for o in our_active_orders}
+
+            # Step 1: Update or add broker orders to our database
+            for order_id, order in broker_order_map.items():
+                # Get the status from the broker order
                 order_status = getattr(order.status, 'value', str(order.status))
-                if order_status in ['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED']:
-                    app_logger.debug(f"Skipping terminal order {order.id} with status {order_status}")
-                    continue
-                    
-                app_logger.info(f"Discovered active order {order.id}")
-                await self.db.log_active_order({
-                    'order_id': order.id,
-                    'symbol': order.symbol,
-                    'status': order_status,
-                    'filled_qty': int(order.filled_qty) if order.filled_qty else 0,
-                    'submitted_at': getattr(order, 'submitted_at', datetime.now())
-                })
-                async with self.order_lock:
-                    self.active_orders[order.id] = {
+                filled_qty = int(order.filled_qty) if order.filled_qty else 0
+                submitted_at = getattr(order, 'submitted_at', datetime.now())
+
+                if order_id in our_order_ids:
+                    # Update existing order in our database
+                    await self.db.update_active_order(order_id, order_status, filled_qty)
+                    # Update in-memory cache
+                    async with self.order_lock:
+                        if order_id in self.active_orders:
+                            self.active_orders[order_id]['status'] = order_status
+                            self.active_orders[order_id]['filled_qty'] = filled_qty
+                else:
+                    # Add new order to our database
+                    await self.db.log_active_order({
+                        'order_id': order_id,
                         'symbol': order.symbol,
                         'status': order_status,
-                        'submitted_at': getattr(order, 'submitted_at', datetime.now())
-                    }
-        
-        app_logger.info(f"Reconciled {len(broker_orders)} active orders")
-        
-    except APIError as e:
-        app_logger.error(f"Reconciliation API error: {e}")
-    except Exception as e:
-        app_logger.error(f"Reconciliation failed: {e}")
+                        'filled_qty': filled_qty,
+                        'submitted_at': submitted_at
+                    })
+                    # Also add to in-memory cache
+                    async with self.order_lock:
+                        self.active_orders[order_id] = {
+                            'symbol': order.symbol,
+                            'status': order_status,
+                            'submitted_at': submitted_at,
+                            'filled_qty': filled_qty
+                        }
 
-            app_logger.info(f"Reconciled {len(broker_orders)} active orders")
+            # Step 2: Mark orders that are in our database but not on the broker as canceled (ghost orders)
+            ghost_order_ids = our_order_ids - broker_order_ids
+            for order_id in ghost_order_ids:
+                app_logger.warning(f"Ghost order {order_id} removed from tracking")
+                await self._remove_ghost_order(order_id)
+
+            app_logger.info(f"Reconciled {len(broker_orders)} broker orders, updated {len(broker_order_ids)} orders, removed {len(ghost_order_ids)} ghost orders")
 
         except APIError as e:
             app_logger.error(f"Reconciliation API error: {e}")
         except Exception as e:
             app_logger.error(f"Reconciliation failed: {e}")
+
+    async def _remove_ghost_order(self, order_id: str):
+        """Completely remove a confirmed ghost order from all tracking systems"""
+        try:
+            # 1. Update database to mark as CANCELED (so it won't appear in future get_active_orders())
+            await self.db.update_active_order(order_id, "CANCELED")
+            
+            # 2. Remove from in-memory tracking
+            async with self.order_lock:
+                self.active_orders.pop(order_id, None)
+            
+            # 3. Also check if there's an associated trade that needs updating
+            try:
+                # Get trade associated with this order
+                conn = await self.db._get_connection()
+                try:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute(
+                        "SELECT id FROM trades WHERE order_id = ? AND status = 'OPEN'", 
+                        (order_id,)
+                    )
+                    trade_row = await cursor.fetchone()
+                    if trade_row:
+                        trade_id = trade_row['id']
+                        # Update trade to reflect order cancellation
+                        await self.db.update_trade_exit(
+                            trade_id,
+                            exit_price=0.0,
+                            exit_time=datetime.now(),
+                            pnl=Decimal('0.0'),
+                            status='CANCELED',
+                            exit_reason='ghost_order_cleanup'
+                        )
+                        app_logger.warning(f"Associated trade {trade_id} marked as CANCELED due to ghost order")
+                finally:
+                    await self.db._release_connection(conn)
+            except Exception as e:
+                app_logger.warning(f"Could not update associated trade for ghost order {order_id}: {e}")
+            
+            app_logger.warning(f"Ghost order {order_id} completely removed from tracking")
+            
+        except Exception as e:
+            app_logger.error(f"Failed to remove ghost order {order_id}: {e}")
 
     async def _reset_daily_limits(self):
         """Reset daily trading limits from DB or initialize with DST handling"""
