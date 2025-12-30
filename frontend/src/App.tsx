@@ -2,9 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from './lib/api';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { LayoutDashboard, Play, ShieldCheck, Terminal, Zap, TrendingUp, Cpu, Radar, Database, Activity } from 'lucide-react';
+import { LayoutDashboard, Play, ShieldCheck, Terminal, Zap, TrendingUp, Cpu, Radar, Activity } from 'lucide-react';
 import { EquityChart } from './components/dashboard/EquityChart';
 import { MarketChart } from './components/dashboard/MarketChart';
+import { SignalCard } from './components/dashboard/SignalCard';
 import { NewsFeed } from './components/dashboard/NewsFeed';
 import { TradeTable } from './components/dashboard/TradeTable';
 
@@ -17,17 +18,18 @@ function useTitanium() {
   const stop = useMutation({ mutationFn: () => api.post('/control/stop') });
   const trade = useMutation({ 
     mutationFn: (p: any) => api.post('/trade/force', p),
-    onSuccess: () => alert("Trade Sent to Engine"),
-    onError: (e: any) => alert("Trade Failed: " + (e.response?.data?.detail || e.message))
+    onSuccess: () => alert("Trade Sent!"),
+    onError: (e: any) => alert("Error: " + (e.response?.data?.detail || e.message))
   });
+  const scan = useMutation({ mutationFn: () => api.post('/tools/scan'), onSuccess: () => state.refetch() });
   
-  return { state, logs, backtest, diag, start, stop, trade };
+  return { state, logs, backtest, diag, start, stop, trade, scan };
 }
 
 const Card = ({ children, className }: any) => <div className={`glass-panel p-6 ${className}`}>{children}</div>;
 
 export default function App() {
-  const { state, logs, backtest, diag, start, stop, trade } = useTitanium();
+  const { state, logs, backtest, diag, start, stop, trade, scan } = useTitanium();
   const [tab, setTab] = useState('live');
   const [qty, setQty] = useState(10);
   const logEndRef = useRef<null | HTMLDivElement>(null);
@@ -42,95 +44,122 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-background text-primary font-sans p-4 md:p-8 max-w-[1700px] mx-auto">
-      <header className="flex justify-between items-center mb-10 border-b border-white/5 pb-8">
+      {/* HEADER */}
+      <header className="flex justify-between items-center mb-6 pb-6 border-b border-white/5">
         <div>
-          <h1 className="text-4xl font-bold tracking-tighter text-white flex items-center gap-3 drop-shadow-lg">
-            <Activity className="text-accent w-10 h-10" /> TITANIUM <span className="text-accent neon-text">v18.6</span>
+          <h1 className="text-3xl font-bold tracking-tighter text-white flex items-center gap-3">
+            <Activity className="text-accent" /> TITANIUM <span className="text-accent neon-text">v18.6</span>
           </h1>
-          <p className="text-secondary text-xs uppercase tracking-[0.3em] mt-2 opacity-60">HMM Quantitative System</p>
         </div>
-        <div className={`px-8 py-3 rounded-2xl glass-card font-mono text-sm font-bold border ${s.is_active ? 'text-accent border-accent/40 animate-pulse' : 'text-danger border-danger/40'}`}>
-          {s.is_active ? '● ENGINE ACTIVE' : '● ENGINE OFFLINE'}
+        
+        {/* STATUS BADGE */}
+        <div className={`px-6 py-2 rounded-full font-mono text-sm font-bold border ${s.is_active ? 'text-accent border-accent/40 animate-pulse' : 'text-danger border-danger/40'}`}>
+          {s.is_active ? '● ONLINE' : '● OFFLINE'}
         </div>
       </header>
 
-      <nav className="flex gap-4 mb-10 border-b border-white/5 pb-1 overflow-x-auto">
-        {[{id: 'live', label: 'COMMAND', icon: LayoutDashboard}, {id: 'sim', label: 'BACKTEST', icon: Play}, {id: 'health', label: 'SYSTEM', icon: ShieldCheck}, {id: 'logs', label: 'LOGS', icon: Terminal}].map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} className={`pb-4 px-4 flex items-center gap-2 text-xs font-bold tracking-widest transition-all border-b-2 whitespace-nowrap hover:text-white ${tab === t.id ? 'border-accent text-accent text-glow' : 'border-transparent text-secondary'}`}>
-            <t.icon size={14} /> {t.label}
+      {/* EMERGENCY CONTROL BAR - ALWAYS VISIBLE */}
+      <div className="flex gap-4 mb-8 bg-surface p-4 rounded-xl border border-white/10">
+        <button 
+          onClick={() => start.mutate()} 
+          className="bg-success text-black px-6 py-2 rounded font-bold hover:brightness-110 flex items-center gap-2"
+        >
+          <Play size={16}/> RESUME ENGINE
+        </button>
+        
+        <button 
+          onClick={() => scan.mutate()} 
+          disabled={scan.isPending}
+          className="bg-blue-600 text-white px-6 py-2 rounded font-bold hover:brightness-110 flex items-center gap-2"
+        >
+          <Radar size={16} className={scan.isPending ? 'animate-spin' : ''}/> 
+          {scan.isPending ? 'SCANNING...' : 'SCAN MARKET'}
+        </button>
+
+        <button 
+          onClick={() => stop.mutate()} 
+          className="bg-danger/20 text-danger border border-danger px-6 py-2 rounded font-bold hover:bg-danger hover:text-white transition ml-auto"
+        >
+          HALT SYSTEM
+        </button>
+      </div>
+
+      {/* NAV */}
+      <nav className="flex gap-4 mb-8 border-b border-white/5 pb-1 overflow-x-auto">
+        {[{id: 'live', label: 'COMMAND'}, {id: 'sim', label: 'BACKTEST'}, {id: 'health', label: 'SYSTEM'}, {id: 'logs', label: 'LOGS'}].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} className={`pb-4 px-4 font-bold text-sm border-b-2 transition ${tab === t.id ? 'border-accent text-accent' : 'border-transparent text-secondary'}`}>
+            {t.label}
           </button>
         ))}
       </nav>
 
+      {/* LIVE TAB */}
       {tab === 'live' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 animate-in fade-in duration-700">
-          
-          {/* V18.6 METRICS */}
-          <div className="lg:col-span-12 grid grid-cols-1 md:grid-cols-5 gap-6">
-            <Card><p className="text-[10px] text-secondary font-bold tracking-widest uppercase">Total Equity</p><p className="text-3xl font-bold mt-2 text-white neon-text">${s.equity?.toLocaleString()}</p></Card>
-            <Card><p className="text-[10px] text-secondary font-bold tracking-widest uppercase">Daily PnL</p><p className={`text-3xl font-bold mt-2 ${s.daily_pnl>=0?'text-accent':'text-danger'}`}>{s.daily_pnl>=0?'+':''}${s.daily_pnl?.toLocaleString()}</p></Card>
-            <Card><p className="text-[10px] text-secondary font-bold tracking-widest uppercase">Active Regime</p><p className="text-3xl font-bold mt-2 text-white">{s.regime || 'WAITING'}</p></Card>
-            <Card><p className="text-[10px] text-secondary font-bold tracking-widest uppercase">Signal Quality</p><p className="text-3xl font-bold mt-2 text-blue-400">{sig.quality ? sig.quality.toFixed(1) : 0}/100</p></Card>
-            <Card><p className="text-[10px] text-secondary font-bold tracking-widest uppercase">API Budget</p><p className="text-3xl font-bold mt-2 text-orange-400">{s.api_usage || 0}/800</p></Card>
+        <div className="space-y-6 animate-in fade-in">
+          {/* METRICS */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+             <Card>
+               <p className="text-xs text-secondary font-bold">TOTAL EQUITY</p>
+               <p className="text-2xl font-bold text-white mt-1">${s.equity?.toLocaleString() || '0.00'}</p>
+             </Card>
+             <Card>
+               <p className="text-xs text-secondary font-bold">REGIME</p>
+               <p className="text-2xl font-bold text-accent mt-1">{s.regime || 'WAITING'}</p>
+             </Card>
+             <Card>
+               <p className="text-xs text-secondary font-bold">SIGNAL</p>
+               <p className={`text-2xl font-bold mt-1 ${sig.sentiment==='BULLISH'?'text-success':'text-danger'}`}>{sig.sentiment || 'NONE'}</p>
+             </Card>
+             <Card>
+               <p className="text-xs text-secondary font-bold">API USAGE</p>
+               <p className="text-2xl font-bold text-orange-400 mt-1">{s.api_usage || 0}/800</p>
+             </Card>
           </div>
 
-          <div className="lg:col-span-8 space-y-8">
-            <EquityChart data={d.history || []} />
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <Card>
-                <h3 className="text-xs font-bold text-secondary uppercase tracking-widest mb-6 flex items-center gap-2"><Cpu size={14}/> Engine Control</h3>
-                <div className="grid grid-cols-2 gap-4 mb-6">
-                  <button onClick={() => start.mutate()} className="btn-cyber text-accent">RESUME</button>
-                  <button onClick={() => stop.mutate()} className="btn-cyber-danger text-danger">HALT</button>
-                </div>
-                <div className="flex gap-2 p-1 bg-black/40 rounded-xl border border-white/5">
-                  <input type="number" value={qty} onChange={e => setQty(Number(e.target.value))} className="bg-transparent w-16 text-center text-white font-bold outline-none text-sm" />
-                  <button onClick={() => trade.mutate({symbol: 'GLD', side: 'buy', qty})} className="flex-1 text-accent font-bold text-[10px] hover:bg-white/5 rounded transition">BUY</button>
-                  <button onClick={() => trade.mutate({symbol: 'GLD', side: 'sell', qty})} className="flex-1 text-danger font-bold text-[10px] hover:bg-white/5 rounded transition">SELL</button>
-                </div>
-              </Card>
-              <NewsFeed />
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-6">
+              <EquityChart data={d.history || []} />
+              <MarketChart data={d.history || []} />
             </div>
-          </div>
+            
+            <div className="space-y-6">
+              {/* MANUAL TRADE */}
+              <Card>
+                 <h3 className="font-bold mb-4 text-xs text-secondary">MANUAL OVERRIDE (GLD)</h3>
+                 <div className="flex gap-2">
+                   <input type="number" value={qty} onChange={e => setQty(Number(e.target.value))} className="w-20 bg-black/30 border border-white/10 rounded p-2 text-center text-white" />
+                   <button onClick={() => trade.mutate({symbol: 'GLD', side: 'buy', qty})} className="flex-1 bg-accent/20 text-accent border border-accent/50 rounded font-bold text-xs hover:bg-accent hover:text-black transition">BUY</button>
+                   <button onClick={() => trade.mutate({symbol: 'GLD', side: 'sell', qty})} className="flex-1 bg-danger/20 text-danger border border-danger/50 rounded font-bold text-xs hover:bg-danger hover:text-white transition">SELL</button>
+                 </div>
+              </Card>
 
-          <div className="lg:col-span-4 space-y-8">
-            {/* SIGNAL STATUS */}
-            <Card className="h-64 flex flex-col justify-center items-center text-center">
-               <Radar size={48} className={`mb-4 ${sig.sentiment==='BULLISH'?'text-accent':'text-danger'}`} />
-               <h2 className="text-2xl font-bold text-white">{sig.sentiment || 'SCANNING'}</h2>
-               <p className="text-secondary text-xs mt-2">Score: {sig.score?.toFixed(3) || 0} | Timeframe: {sig.timeframe || '1d'}</p>
-            </Card>
-
-            <div className="glass-panel h-[400px] flex flex-col">
-              <div className="p-4 border-b border-white/5 bg-black/30 font-bold text-[10px] text-secondary tracking-widest">LIVE LOGS</div>
-              <div className="flex-1 overflow-y-auto p-5 font-mono text-[10px] space-y-3 opacity-80">
-                {logData.slice().reverse().map((l: any, i: number) => (
-                  <div key={i} className="flex gap-3"><span className="text-gray-600 shrink-0">{l.timestamp?.split('T')[1]?.split('.')[0]}</span><span className={l.level==='ERROR'?'text-danger':'text-accent'}>[{l.level}]</span><span className="text-gray-300">{l.message}</span></div>
-                ))}
+              <SignalCard signal={sig} />
+              
+              <div className="glass-panel h-[300px] flex flex-col">
+                <div className="p-3 border-b border-white/5 bg-black/30 font-bold text-[10px] text-secondary">LIVE LOGS</div>
+                <div className="flex-1 overflow-y-auto p-3 font-mono text-[10px] space-y-2 opacity-80">
+                  {logData.slice().reverse().map((l: any, i: number) => (
+                    <div key={i}><span className={l.level==='ERROR'?'text-danger':'text-accent'}>[{l.level}]</span> {l.message}</div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
-          <div className="lg:col-span-12"><TradeTable trades={d.trades || []} /></div>
+          <TradeTable trades={d.trades || []} />
         </div>
       )}
 
-      {/* SIM TAB */}
+      {/* BACKTEST TAB */}
       {tab === 'sim' && (
         <div className="glass-panel p-10 text-center animate-in fade-in">
-          <h2 className="text-2xl font-bold mb-4">Walk-Forward Analysis</h2>
-          <button onClick={() => backtest.mutate()} className="btn-cyber text-accent">{backtest.isPending ? 'RUNNING SIMULATION...' : 'RUN V18.6 BACKTEST'}</button>
-          
+          <button onClick={() => backtest.mutate()} className="bg-accent text-black px-8 py-3 rounded font-bold mb-8">RUN SIMULATION</button>
           {btData && (
-            <div className="mt-10 space-y-8">
-               <div className="grid grid-cols-4 gap-4">
-                 <Card><p className="text-xs text-secondary">Total Return</p><p className="text-2xl font-bold text-accent">{(btData.stats['Total Return'] * 100).toFixed(2)}%</p></Card>
-                 <Card><p className="text-xs text-secondary">Sharpe</p><p className="text-2xl font-bold">{btData.stats['Sharpe']?.toFixed(2)}</p></Card>
-                 <Card><p className="text-xs text-secondary">Drawdown</p><p className="text-2xl font-bold text-danger">{(btData.stats['Max DD'] * 100).toFixed(2)}%</p></Card>
-                 <Card><p className="text-xs text-secondary">Folds</p><p className="text-2xl font-bold">{btData.stats['Completed Folds']}</p></Card>
-               </div>
-               <div className="h-80 w-full bg-black/20 rounded-xl p-4">
-                 <ResponsiveContainer><AreaChart data={btData.equity_curve}><YAxis domain={['auto', 'auto']} hide /><Tooltip contentStyle={{background:'#000', border:'1px solid #333'}}/><Area dataKey="value" stroke="#10B981" fill="#10B98122"/></AreaChart></ResponsiveContainer>
-               </div>
+            <div className="h-80 w-full bg-black/20 rounded-xl p-4">
+              <ResponsiveContainer><AreaChart data={btData.equity_curve}><YAxis hide/><Tooltip contentStyle={{background:'#000'}}/ ><Area dataKey="value" stroke="#10B981" fill="#10B98122"/></AreaChart></ResponsiveContainer>
+              <div className="grid grid-cols-4 gap-4 mt-4">
+                <div><p className="text-xs text-secondary">Return</p><p className="font-bold text-xl text-accent">{(btData.stats['Total Return']*100).toFixed(2)}%</p></div>
+                <div><p className="text-xs text-secondary">Sharpe</p><p className="font-bold text-xl">{btData.stats['Sharpe']?.toFixed(2)}</p></div>
+              </div>
             </div>
           )}
         </div>
@@ -138,22 +167,19 @@ export default function App() {
 
       {/* HEALTH TAB */}
       {tab === 'health' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-in fade-in">
-           {diag.data?.map((c: any, i: number) => (
-             <div key={i} className="glass-panel p-6 flex justify-between items-center"><span className="font-bold text-lg">{c.name}</span><span className={`px-4 py-1 rounded-full text-xs font-bold ${c.status==='PASS'?'bg-success/20 text-success':'bg-danger/20 text-danger'}`}>{c.status}</span></div>
-           ))}
-           <button onClick={() => diag.refetch()} className="col-span-full btn-cyber text-white">RE-SCAN SYSTEM</button>
+        <div className="grid gap-4 animate-in fade-in">
+          <button onClick={() => diag.refetch()} className="bg-white/10 text-white py-3 rounded font-bold">SCAN SYSTEM HEALTH</button>
+          {diag.data?.map((c:any, i:number) => (
+             <div key={i} className="glass-panel p-4 flex justify-between"><span className="font-bold">{c.name}</span><span className={c.status==='PASS'?'text-accent':'text-danger'}>{c.status}</span></div>
+          ))}
         </div>
       )}
 
       {/* LOGS TAB */}
       {tab === 'logs' && (
-        <div className="glass-panel h-[800px] flex flex-col animate-in fade-in">
-           <div className="p-6 border-b border-white/5 font-bold tracking-widest text-secondary">FULL SYSTEM LOGS</div>
-           <div className="flex-1 overflow-y-auto p-6 font-mono text-xs space-y-2">
-             {logData.map((l:any, i:number) => <div key={i} className="border-b border-white/5 pb-1 opacity-70 hover:opacity-100"><span className={`mr-2 ${l.level==='ERROR'?'text-danger':l.level==='WARNING'?'text-warning':'text-accent'}`}>[{l.level}]</span>{l.message}</div>)}
-             <div ref={logEndRef} />
-           </div>
+        <div className="glass-panel h-[800px] overflow-y-auto p-4 font-mono text-xs space-y-1 animate-in fade-in">
+          {logData.map((l:any, i:number) => <div key={i}><span className="text-secondary">{l.timestamp}</span> <span className={l.level==='ERROR'?'text-danger':'text-accent'}>{l.level}</span> {l.message}</div>)}
+          <div ref={logEndRef} />
         </div>
       )}
     </div>
