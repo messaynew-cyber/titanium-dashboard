@@ -4564,3 +4564,112 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         app_logger.info("Process interrupted by user")
         sys.exit(0)
+# ===============================================================================
+# 🚀 SYSTEM CONTROLLER (REQUIRED FOR DASHBOARD)
+# ===============================================================================
+class TitaniumSystem:
+    def __init__(self):
+        # Load Config
+        self.conf = SystemConfig()
+        
+        # Initialize Database
+        self.db = DatabaseManager(self.conf)
+        
+        # Initialize Data Engine
+        self.data = MultiTimeframeDataEngine(self.conf, self.db)
+        
+        # Initialize Brain
+        self.brain = MultiTimeframeBrain(self.conf)
+        
+        # Initialize Telegram
+        self.telegram = TelegramBot(self.conf.TELEGRAM_TOKEN, self.conf.TELEGRAM_CHANNEL)
+        
+        # Initialize Alpaca Client
+        self.client = TradingClient(self.conf.API_KEY, self.conf.SECRET_KEY, paper=self.conf.PAPER_TRADING)
+        
+        # Initialize Execution Engine
+        self.executor = ExecutionEngine(self.conf, self.client, self.db, self.telegram, self.data)
+
+    async def initialize(self):
+        """Boot up all components"""
+        print("[System] Initializing Titanium Components...")
+        await self.db.initialize()
+        await self.data.initialize()
+        await self.telegram.initialize()
+        await self.brain.initialize()
+        
+        # Link weak references for the brain
+        self.brain.data_engine = self.data
+        self.brain.telegram = self.telegram
+        
+        await self.executor.initialize()
+        print("[System] Initialization Complete.")
+
+    async def shutdown(self):
+        """Graceful shutdown"""
+        print("[System] Shutting down...")
+        await self.executor.shutdown()
+        await self.telegram.close()
+        if self.data.session and not self.data.session.closed:
+            await self.data.session.close()
+
+# --- EXPOSED LIVE LOOP FOR DASHBOARD ---
+async def _live_loop(config, data_engine, brain, executor, telegram, shutdown_event):
+    """
+    This function allows the Dashboard Wrapper to run the bot's logic 
+    as a background process.
+    """
+    print("--- TITANIUM LIVE TRADING LOOP STARTED (DASHBOARD MODE) ---")
+    
+    # Ensure components are ready
+    if not executor.active_orders:
+        await executor.initialize()
+
+    loop_count = 0
+    
+    while not shutdown_event.is_set():
+        try:
+            loop_count += 1
+            
+            # 1. Memory Safety Check
+            process = psutil.Process()
+            if process.memory_info().rss / 1024 / 1024 > config.MEMORY_LIMIT_MB:
+                app_logger.critical("Memory limit exceeded. Restarting loop.")
+                break
+
+            # 2. Data Fetch (High Priority)
+            # Fetch primary timeframe
+            await data_engine.fetch_timeframe(config.PRIMARY_TIMEFRAME, priority="high")
+            
+            # 3. Brain Processing
+            df = data_engine.get_df(config.PRIMARY_TIMEFRAME)
+            if not df.empty:
+                # Check for retraining
+                should_train, reason = await brain.should_retrain(config.PRIMARY_TIMEFRAME, df)
+                if should_train:
+                    await brain.train_timeframe(config.PRIMARY_TIMEFRAME, df, reason)
+                
+                # Predict
+                signal = await brain.predict_timeframe(config.PRIMARY_TIMEFRAME, df)
+                
+                # 4. Execution
+                if signal.get('is_valid') and signal.get('action') != 'HOLD':
+                    await executor.execute_trade(config.SYMBOL, signal)
+                    
+                # Check for exits on existing positions
+                await executor.check_and_close_positions(config.SYMBOL, [signal])
+
+            # 5. Maintenance
+            if loop_count % 10 == 0:
+                await executor._reconcile_active_orders()
+                await executor.check_liquidated_positions()
+
+            # Sleep
+            await asyncio.sleep(1)
+            
+        except asyncio.CancelledError:
+            print("Loop cancelled by user.")
+            break
+        except Exception as e:
+            app_logger.error(f"Live loop error: {e}")
+            await asyncio.sleep(5)
