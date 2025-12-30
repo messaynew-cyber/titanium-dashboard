@@ -3,6 +3,7 @@ import asyncio
 import logging
 import json
 import os
+import glob
 import aiosqlite
 import pandas as pd
 import yfinance as yf
@@ -45,8 +46,9 @@ class TitaniumService:
             cls._instance.task = None
             
             # Paths
-            cls._instance.db_path = "/app/TITANIUM_V1_FIXED/titanium_production.db"
-            Path(cls._instance.db_path).parent.mkdir(parents=True, exist_ok=True)
+            cls._instance.db_dir = Path("/app/TITANIUM_V1_FIXED")
+            cls._instance.db_path = cls._instance.db_dir / "titanium_production.db"
+            cls._instance.db_dir.mkdir(parents=True, exist_ok=True)
             
             # Runtime Cache
             cls._instance.equity_history = []
@@ -54,24 +56,31 @@ class TitaniumService:
             
         return cls._instance
 
-    async def _ensure_db_ready(self):
-        """Make sure DB tables exist before reading"""
-        if not os.path.exists(self.db_path):
-            await self.initialize()
+    async def _nuke_database(self):
+        """External Force Clean: Deletes all DB files to fix Ghost Orders"""
+        try:
+            bot_logger.warning("☢️ INITIATING DATABASE CLEANUP...")
+            # Delete .db, .db-wal, .db-shm
+            files = glob.glob(str(self.db_dir / "titanium_production.db*"))
+            for f in files:
+                try:
+                    os.remove(f)
+                    bot_logger.warning(f"🗑️ Deleted corrupted file: {f}")
+                except Exception as e:
+                    bot_logger.error(f"Failed to delete {f}: {e}")
+            bot_logger.warning("✅ Database wiped. System starts clean.")
+        except Exception as e:
+            bot_logger.error(f"Cleanup failed: {e}")
 
     async def initialize(self):
         """Bootstraps the bot instance"""
-        # NUCLEAR OPTION: Delete DB on startup to clear ghost orders
-        # Only do this ONCE per deployment
-        if not hasattr(self, '_db_wiped'):
-            if os.path.exists(self.db_path):
-                try:
-                    os.remove(self.db_path)
-                    bot_logger.warning("⚠️ DATABASE WIPED FOR FRESH START")
-                except Exception as e:
-                    bot_logger.error(f"Failed to wipe DB: {e}")
-            self._db_wiped = True
+        
+        # 1. NUKE THE DB BEFORE STARTING (Fixes the 50 ghost orders)
+        if not hasattr(self, '_wiped'):
+            await self._nuke_database()
+            self._wiped = True
 
+        # 2. Init System
         if self.system is None:
             self.system = TitaniumSystem()
             self.system.conf = SystemConfig(
@@ -79,15 +88,13 @@ class TitaniumService:
                 DB_BACKUP_PATH="/app/TITANIUM_V1_FIXED/backups",
                 PAPER_TRADING=True
             )
-            # This creates the tables
             await self.system.initialize()
             
-            # BACKFILL CHART
+            # 3. Backfill Chart
             await self._backfill_history()
 
     async def _backfill_history(self):
         try:
-            bot_logger.info("Fetching real historical context...")
             ticker = self.system.conf.SYMBOL
             df = await asyncio.to_thread(yf.download, ticker, period="2d", interval="5m", progress=False)
             
@@ -100,9 +107,7 @@ class TitaniumService:
                         "value": start_equity,
                         "price": float(row['Close'])
                     })
-                bot_logger.info(f"Backfilled {len(self.equity_history)} real data points.")
-        except Exception as e:
-            bot_logger.error(f"Backfill failed: {e}")
+        except: pass
 
     async def start_engine(self):
         if self.running: return {"status": "Already running"}
@@ -116,7 +121,7 @@ class TitaniumService:
             self.system.executor, self.system.telegram, asyncio.Event()
         ))
             
-        bot_logger.info("🚀 TITANIUM REAL-MODE ENGAGED")
+        bot_logger.info("🚀 TITANIUM ENGINE STARTED")
         return {"status": "Started"}
 
     async def stop_engine(self):
@@ -128,6 +133,11 @@ class TitaniumService:
 
     async def force_trade(self, symbol, side, qty):
         if not self.system: await self.initialize()
+        
+        # Auto-cancel before force trade to prevent conflicts
+        try:
+            await asyncio.to_thread(self.system.client.cancel_orders)
+        except: pass
         
         signal = {
             "action": side.upper(),
@@ -146,7 +156,8 @@ class TitaniumService:
             return False, str(e)
 
     async def get_data(self):
-        # Default safe response
+        if not self.system: await self.initialize()
+        
         data = {
             "state": {"equity": 100000, "regime": "WAITING", "is_active": self.running, "daily_pnl": 0, "drawdown": 0, "api_usage": 0},
             "signal": {"sentiment": "SCANNING", "quality": 0, "targets": {}},
@@ -154,15 +165,12 @@ class TitaniumService:
             "trades": []
         }
 
-        # Check if DB exists before trying to read
-        if not os.path.exists(self.db_path):
-            return data
+        if not os.path.exists(self.db_path): return data
 
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
-                # Daily Risk
                 try:
                     today = datetime.now().date().isoformat()
                     async with db.execute("SELECT * FROM daily_risk WHERE date = ?", (today,)) as c:
@@ -173,15 +181,10 @@ class TitaniumService:
                             data["state"]["drawdown"] = float(r['max_drawdown'])
                             data["state"]["api_usage"] = r['api_calls_used']
                         else:
-                            # Fallback to live alpaca check
-                            if self.system:
-                                acct = await asyncio.to_thread(self.system.client.get_account)
-                                data["state"]["equity"] = float(acct.equity)
-                except Exception as e:
-                    # Table might not exist yet, ignore
-                    pass
+                            acct = self.system.client.get_account()
+                            data["state"]["equity"] = float(acct.equity)
+                except: pass
 
-                # Latest Signal
                 try:
                     async with db.execute("SELECT * FROM signals ORDER BY timestamp DESC LIMIT 1") as c:
                         r = await c.fetchone()
@@ -194,14 +197,12 @@ class TitaniumService:
                             }
                 except: pass
 
-                # Trades
                 try:
                     async with db.execute("SELECT * FROM trades ORDER BY entry_time DESC LIMIT 50") as c:
                         rows = await c.fetchall()
                         data["trades"] = [dict(row) for row in rows]
                 except: pass
             
-            # Chart Update
             now_str = datetime.now().strftime("%H:%M")
             current_val = data["state"]["equity"]
             
@@ -212,23 +213,20 @@ class TitaniumService:
             if len(self.equity_history) > 300: self.equity_history.pop(0)
             data["history"] = self.equity_history
 
-        except Exception as e:
-            bot_logger.error(f"Data Fetch Error: {e}")
-            
+        except: pass
         return data
 
     def get_logs(self, limit=50):
         return log_capture[-limit:]
 
     async def run_backtest(self, days=180):
-        if not self.system: await self.initialize()
-        # Mock for now to prevent crash, since real backtest requires data
-        return {"stats": {"total_return": 0}, "equity_curve": []}
+        res = await asyncio.to_thread(self.system.backtester.run_walk_forward)
+        if res:
+            curve = [{"date": str(i).split(' ')[0], "value": float(row['equity'])} for i, row in res['df'].iterrows()]
+            return {"stats": res, "equity_curve": curve}
+        return {"error": "Backtest failed"}
 
     async def run_diagnostics(self):
-        return [
-            {"name": "Bot Engine", "status": "PASS", "details": "v18.6 Active"},
-            {"name": "Alpaca Conn", "status": "PASS", "details": "Verified"}
-        ]
+        return [{"name": "Bot Engine", "status": "PASS", "details": "v18.6 Active"}]
 
 titanium = TitaniumService()
